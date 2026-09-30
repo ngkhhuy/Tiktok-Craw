@@ -16,12 +16,52 @@ const state = {
   currentJobId: null,
   crawlPollTimer: null,
   currentProfileBaseViews: 0,
+  activeMainTab: 'crawler',
+  chatSessionId: null,
+  isChatBusy: false,
 };
 
 // DOM Elements Cache
 const elements = {
+  mainTabs: {
+    btnCrawler: document.getElementById('btnTabCrawler'),
+    btnAnalytics: document.getElementById('btnTabAnalytics'),
+    viewCrawler: document.getElementById('viewCrawler'),
+    viewAnalytics: document.getElementById('viewAnalytics'),
+  },
+  chat: {
+    messages: document.getElementById('chatMessages'),
+    input: document.getElementById('chatInput'),
+    btnSend: document.getElementById('btnSendChat'),
+    btnClear: document.getElementById('btnClearChat'),
+    modelIndicator: document.getElementById('chatModelIndicator'),
+    suggChips: document.querySelectorAll('.sugg-chip'),
+    workspace: document.getElementById('analyticsWorkspace'),
+    videoSidebar: document.getElementById('aiVideoSidebar'),
+    videoList: document.getElementById('aiVideoList'),
+    sidebarTitle: document.getElementById('aiSidebarTitle'),
+    sidebarBadge: document.getElementById('aiSidebarBadge'),
+    btnCloseSidebar: document.getElementById('btnCloseVideoSidebar'),
+    btnReopenSidebar: document.getElementById('btnReopenVideoSidebar'),
+    btnToggleAllLocal: document.getElementById('btnToggleAllLocal'),
+    btnToggleAllEmbed: document.getElementById('btnToggleAllEmbed'),
+  },
+  aiConfig: {
+    backdrop: document.getElementById('aiConfigModalBackdrop'),
+    card: document.getElementById('aiConfigModalCard'),
+    closeBtn: document.getElementById('aiConfigModalClose'),
+    btnOpen: document.getElementById('btnOpenAiConfig'),
+    btnCancel: document.getElementById('btnCancelAiConfig'),
+    form: document.getElementById('aiConfigForm'),
+    presetChips: document.querySelectorAll('.preset-chip'),
+    llmBaseUrl: document.getElementById('cfgLlmBaseUrl'),
+    llmModel: document.getElementById('cfgLlmModel'),
+    llmApiKey: document.getElementById('cfgLlmApiKey'),
+    embeddingModel: document.getElementById('cfgEmbeddingModel'),
+  },
   ingest: {
     input: document.getElementById('ingestInput'),
+    concurrencySelect: document.getElementById('concurrencySelect'),
     btnClear: document.getElementById('btnClearIngest'),
     btnStart: document.getElementById('btnStartIngest'),
     quickChips: document.querySelectorAll('.chip-item'),
@@ -928,10 +968,11 @@ async function startCrawlJob(input, type) {
   elements.ingest.btnStopCrawl.textContent = 'Dừng cào';
 
   try {
+    const concurrency = parseInt(elements.ingest.concurrencySelect?.value || '16', 10);
     const res = await fetch('/api/crawl', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ input, limit: 1000 }),
+      body: JSON.stringify({ input, limit: 1000, concurrency }),
     });
 
     const data = await res.json();
@@ -987,6 +1028,7 @@ async function startCrawlJob(input, type) {
           clearInterval(state.crawlPollTimer);
           state.crawlPollTimer = null;
           elements.ingest.progressBarFill.style.width = '100%';
+          elements.ingest.progressCounter.textContent = `${total}/${total}`;
           if (progress.message) {
             elements.ingest.progressStatusText.textContent = progress.message;
           } else if (currentCompletedCount === 0 && currentSkippedCount > 0) {
@@ -997,6 +1039,7 @@ async function startCrawlJob(input, type) {
             elements.ingest.progressStatusText.textContent = `✓ Hoàn tất trích xuất! Đã tải mới ${currentCompletedCount} video${currentSkippedCount > 0 ? ` (${currentSkippedCount} video đã có sẵn)` : ''}.`;
           }
           elements.ingest.btnStopCrawl.disabled = true;
+          elements.ingest.btnStopCrawl.textContent = 'Hoàn tất';
           showToast(`🎉 Trích xuất hoàn tất!`);
           fetchVideos();
         } else if (sData.status === 'stopped') {
@@ -1037,8 +1080,784 @@ async function stopCrawlJob() {
   }
 }
 
+async function fetchSystemInfo() {
+  try {
+    const res = await fetch('/api/system-info');
+    if (!res.ok) return;
+    const info = await res.json();
+    if (elements.ingest.concurrencySelect && info.cpuCores) {
+      const cores = info.cpuCores;
+      const opts = elements.ingest.concurrencySelect.options;
+      let matched = false;
+      for (let i = 0; i < opts.length; i++) {
+        if (parseInt(opts[i].value, 10) === cores) {
+          const cpuTag = info.cpuModel.includes('1240P') ? 'Intel i5-1240P' : `${cores} Threads CPU`;
+          opts[i].textContent = `${cores} luồng (${cpuTag})`;
+          opts[i].selected = true;
+          matched = true;
+          break;
+        }
+      }
+      if (!matched && cores > 0) {
+        const opt = document.createElement('option');
+        opt.value = String(cores);
+        opt.textContent = `${cores} luồng (${cores} Cores/Threads)`;
+        opt.selected = true;
+        elements.ingest.concurrencySelect.appendChild(opt);
+      }
+    }
+  } catch {}
+}
+
+// ─── AI Analytics RAG Q&A Assistant ────────────────────────
+
+function initMainTabs() {
+  if (!elements.mainTabs.btnCrawler || !elements.mainTabs.btnAnalytics) return;
+
+  function switchTab(tabName) {
+    state.activeMainTab = tabName;
+    if (tabName === 'crawler') {
+      elements.mainTabs.btnCrawler.classList.add('active');
+      elements.mainTabs.btnAnalytics.classList.remove('active');
+      elements.mainTabs.viewCrawler.classList.remove('hidden');
+      elements.mainTabs.viewAnalytics.classList.add('hidden');
+    } else {
+      elements.mainTabs.btnCrawler.classList.remove('active');
+      elements.mainTabs.btnAnalytics.classList.add('active');
+      elements.mainTabs.viewCrawler.classList.add('hidden');
+      elements.mainTabs.viewAnalytics.classList.remove('hidden');
+      elements.chat.input.focus();
+    }
+  }
+
+  elements.mainTabs.btnCrawler.addEventListener('click', () => switchTab('crawler'));
+  elements.mainTabs.btnAnalytics.addEventListener('click', () => switchTab('analytics'));
+}
+
+function initChatEvents() {
+  if (!elements.chat.btnSend || !elements.chat.input) return;
+
+  // Send on click
+  elements.chat.btnSend.addEventListener('click', () => {
+    sendChatMessage();
+  });
+
+  // Send on Enter (Shift+Enter for newline)
+  elements.chat.input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendChatMessage();
+    }
+  });
+
+  // Suggested Chips
+  elements.chat.suggChips.forEach((chip) => {
+    chip.addEventListener('click', () => {
+      const q = chip.getAttribute('data-query');
+      if (q) {
+        elements.chat.input.value = q;
+        sendChatMessage();
+      }
+    });
+  });
+
+  // Video Sidebar Close
+  if (elements.chat.btnCloseSidebar) {
+    elements.chat.btnCloseSidebar.addEventListener('click', () => {
+      if (elements.chat.videoSidebar) {
+        elements.chat.videoSidebar.classList.add('hidden');
+      }
+      if (elements.chat.workspace) {
+        elements.chat.workspace.classList.remove('has-sidebar');
+      }
+      if (elements.chat.btnReopenSidebar) {
+        elements.chat.btnReopenSidebar.classList.remove('hidden');
+      }
+    });
+  }
+
+  // Video Sidebar Reopen
+  if (elements.chat.btnReopenSidebar) {
+    elements.chat.btnReopenSidebar.addEventListener('click', () => {
+      if (elements.chat.videoSidebar) {
+        elements.chat.videoSidebar.classList.remove('hidden');
+      }
+      if (elements.chat.workspace) {
+        elements.chat.workspace.classList.add('has-sidebar');
+      }
+      elements.chat.btnReopenSidebar.classList.add('hidden');
+    });
+  }
+
+  // Toggle all to Local MP4
+  if (elements.chat.btnToggleAllLocal) {
+    elements.chat.btnToggleAllLocal.addEventListener('click', () => {
+      if (!elements.chat.videoList) return;
+      elements.chat.videoList.querySelectorAll('.btn-switch-player').forEach(btn => {
+        if (btn.dataset.mode === 'embed') {
+          btn.click();
+        }
+      });
+      elements.chat.btnToggleAllLocal.classList.add('active');
+      if (elements.chat.btnToggleAllEmbed) {
+        elements.chat.btnToggleAllEmbed.classList.remove('active');
+      }
+    });
+  }
+
+  // Toggle all to TikTok Embed
+  if (elements.chat.btnToggleAllEmbed) {
+    elements.chat.btnToggleAllEmbed.addEventListener('click', () => {
+      if (!elements.chat.videoList) return;
+      elements.chat.videoList.querySelectorAll('.btn-switch-player').forEach(btn => {
+        if (btn.dataset.mode === 'local') {
+          btn.click();
+        }
+      });
+      elements.chat.btnToggleAllEmbed.classList.add('active');
+      if (elements.chat.btnToggleAllLocal) {
+        elements.chat.btnToggleAllLocal.classList.remove('active');
+      }
+    });
+  }
+
+  // Clear Session
+  if (elements.chat.btnClear) {
+    elements.chat.btnClear.addEventListener('click', async () => {
+      if (state.chatSessionId) {
+        try {
+          await fetch(`/api/rag/sessions/${state.chatSessionId}`, { method: 'DELETE' });
+        } catch {}
+      }
+      state.chatSessionId = null;
+      if (elements.chat.videoSidebar) {
+        elements.chat.videoSidebar.classList.add('hidden');
+      }
+      if (elements.chat.workspace) {
+        elements.chat.workspace.classList.remove('has-sidebar');
+      }
+      if (elements.chat.btnReopenSidebar) {
+        elements.chat.btnReopenSidebar.classList.add('hidden');
+      }
+      elements.chat.messages.innerHTML = `
+        <div class="chat-message assistant welcome-message">
+          <div class="msg-avatar">🤖</div>
+          <div class="msg-body">
+            <div class="msg-header">
+              <span class="msg-sender">TikTok Analytics AI</span>
+              <span class="msg-time">Hệ thống</span>
+            </div>
+            <div class="msg-content">
+              <p>Đã làm mới phiên hội thoại! Bạn có thể đặt câu hỏi phân tích dữ liệu mới bất cứ lúc nào.</p>
+            </div>
+          </div>
+        </div>
+      `;
+      showToast('Đã bắt đầu phiên hội thoại phân tích mới');
+    });
+  }
+}
+
+async function sendChatMessage() {
+  const query = elements.chat.input.value.trim();
+  if (!query || state.isChatBusy) return;
+
+  state.isChatBusy = true;
+  elements.chat.input.value = '';
+  elements.chat.btnSend.disabled = true;
+
+  // Append User Message
+  appendUserMessage(query);
+
+  // Append Thinking Indicator
+  const thinkingId = appendThinkingMessage();
+
+  try {
+    const res = await fetch('/api/rag/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question: query,
+        sessionId: state.chatSessionId || undefined,
+      }),
+    });
+
+    removeThinkingMessage(thinkingId);
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: 'Lỗi server' }));
+      appendAssistantMessage(`❌ **Lỗi:** ${err.error || 'Không thể xử lý câu hỏi.'}`);
+      return;
+    }
+
+    const data = await res.json();
+    state.chatSessionId = data.sessionId;
+
+    if (elements.chat.modelIndicator) {
+      elements.chat.modelIndicator.textContent = `⚡ ${data.model} (${data.latencyMs}ms)`;
+    }
+
+    // Extract videos mentioned or ranked in RAG results
+    const relatedVideos = extractVideosFromRagResult(data);
+
+    appendAssistantMessage(data.answer, data.intent, relatedVideos);
+
+    if (relatedVideos && relatedVideos.length > 0) {
+      displayAiVideoDeck(relatedVideos, getDeckTitleFromIntent(data.intent, query));
+    }
+  } catch (err) {
+    removeThinkingMessage(thinkingId);
+    appendAssistantMessage(`❌ **Lỗi kết nối:** ${err.message}`);
+  } finally {
+    state.isChatBusy = false;
+    elements.chat.btnSend.disabled = false;
+    elements.chat.input.focus();
+  }
+}
+
+function extractVideosFromRagResult(data) {
+  if (!data) return [];
+  const videos = [];
+  const seenIds = new Set();
+
+  function addVideo(v) {
+    if (!v || !v.video_id || seenIds.has(v.video_id)) return;
+    seenIds.add(v.video_id);
+    videos.push(v);
+  }
+
+  // 1. Ranking list
+  if (data.evidence?.metrics?.ranking?.videos && Array.isArray(data.evidence.metrics.ranking.videos)) {
+    data.evidence.metrics.ranking.videos.forEach(addVideo);
+  }
+
+  // 2. Top video from aggregation MAX / MIN
+  if (data.evidence?.metrics?.aggregation?.top_video) {
+    addVideo(data.evidence.metrics.aggregation.top_video);
+  }
+
+  // 3. Creator analysis top videos
+  if (data.evidence?.metrics?.creator_analysis?.top_videos && Array.isArray(data.evidence.metrics.creator_analysis.top_videos)) {
+    data.evidence.metrics.creator_analysis.top_videos.forEach(addVideo);
+  }
+
+  // 4. Single video lookup
+  if (data.evidence?.metrics?.video) {
+    const vm = data.evidence.metrics.video;
+    addVideo({
+      video_id: vm.video_id,
+      username: vm.username,
+      display_name: vm.display_name,
+      description: vm.description,
+      views: vm.raw?.views || 0,
+      likes: vm.raw?.likes || 0,
+      comments: vm.raw?.comments || 0,
+      shares: vm.raw?.shares || 0,
+      like_rate: vm.rates?.like_rate || null,
+      engagement_rate: vm.rates?.engagement_rate || null,
+      duration: vm.raw?.duration || 0,
+      tiktok_url: `https://www.tiktok.com/@${vm.username}/video/${vm.video_id}`,
+    });
+  }
+
+  // 5. Comparisons
+  if (data.evidence?.comparisons?.video_a) {
+    addVideo(data.evidence.comparisons.video_a);
+  }
+  if (data.evidence?.comparisons?.video_b) {
+    addVideo(data.evidence.comparisons.video_b);
+  }
+  if (data.evidence?.comparisons?.comparison?.video_a) {
+    addVideo(data.evidence.comparisons.comparison.video_a);
+  }
+  if (data.evidence?.comparisons?.comparison?.video_b) {
+    addVideo(data.evidence.comparisons.comparison.video_b);
+  }
+
+  // 6. Fallback: Parse 18-19 digit video IDs in text or plan entities
+  if (videos.length === 0) {
+    const rawIds = data.plan?.entities?.videoIds || [];
+    const textMatches = (data.answer || '').match(/\b\d{18,20}\b/g) || [];
+    const allCandidateIds = Array.from(new Set([...rawIds, ...textMatches]));
+
+    for (const vid of allCandidateIds) {
+      const localVid = state.allVideos.find(x => x.video_id === vid);
+      if (localVid) {
+        addVideo({
+          video_id: localVid.video_id,
+          username: localVid.username,
+          display_name: localVid.display_name,
+          description: localVid.description,
+          views: localVid.views,
+          likes: localVid.likes,
+          comments: localVid.comments_count,
+          shares: localVid.shares,
+          like_rate: localVid.like_rate,
+          engagement_rate: localVid.engagement_rate,
+          duration: localVid.duration,
+          tiktok_url: `https://www.tiktok.com/@${localVid.username}/video/${localVid.video_id}`,
+        });
+      } else {
+        addVideo({
+          video_id: vid,
+          username: 'tiktok',
+          description: `Video ID: ${vid}`,
+          views: 0,
+          likes: 0,
+          tiktok_url: `https://www.tiktok.com/video/${vid}`,
+        });
+      }
+    }
+  }
+
+  return videos;
+}
+
+function getDeckTitleFromIntent(intent, query = '') {
+  const lower = query.toLowerCase();
+  if (lower.includes('like') || lower.includes('tim') || lower.includes('thích')) {
+    return 'Top Video Nhiều Lượt Thích Nhất';
+  }
+  if (lower.includes('view') || lower.includes('xem')) {
+    return 'Top Video Nhiều Lượt Xem Nhất';
+  }
+  if (lower.includes('comment') || lower.includes('bình luận')) {
+    return 'Top Video Nhiều Bình Luận Nhất';
+  }
+  if (lower.includes('tương tác') || lower.includes('engagement')) {
+    return 'Top Video Tương Tác Cao Nhất';
+  }
+  if (intent === 'RANKING') return 'Bảng Xếp Hạng Video';
+  if (intent === 'COMPARISON') return 'Video Đang So Sánh';
+  if (intent === 'METRIC_LOOKUP') return 'Chi Tiết Video Đã Chọn';
+  return 'Video Nổi Bật Được Đề Cập';
+}
+
+function displayAiVideoDeck(videos, title = 'Video Nổi Bật') {
+  if (!elements.chat.videoSidebar || !elements.chat.videoList) return;
+  if (!videos || videos.length === 0) return;
+
+  // Set titles
+  if (elements.chat.sidebarTitle) {
+    elements.chat.sidebarTitle.textContent = title;
+  }
+  if (elements.chat.sidebarBadge) {
+    elements.chat.sidebarBadge.textContent = `${videos.length} video sẵn sàng phát`;
+  }
+
+  // Clear current list
+  elements.chat.videoList.innerHTML = '';
+
+  // Render cards
+  videos.forEach((v, idx) => {
+    const rankClass = idx === 0 ? 'rank-1' : idx === 1 ? 'rank-2' : idx === 2 ? 'rank-3' : 'rank-other';
+    const cardEl = document.createElement('div');
+    cardEl.className = 'ai-video-card';
+    cardEl.dataset.videoId = v.video_id;
+
+    const desc = v.description || 'Không có mô tả video';
+    const username = v.username || 'tiktok';
+    const tiktokUrl = v.tiktok_url || `https://www.tiktok.com/@${username}/video/${v.video_id}`;
+
+    cardEl.innerHTML = `
+      <div class="ai-video-card-top">
+        <div class="ai-rank-badge ${rankClass}">#${idx + 1}</div>
+        <div class="ai-video-card-author">
+          <span class="ai-author-name">@${escapeHtml(username)}</span>
+          <span class="ai-video-id-chip">ID: ${v.video_id}</span>
+        </div>
+        <div class="ai-video-stats-pills">
+          <span class="stat-pill views" title="Lượt xem">👁️ ${formatNumber(v.views)}</span>
+          <span class="stat-pill likes" title="Lượt thích">❤️ ${formatNumber(v.likes)}</span>
+        </div>
+      </div>
+
+      <p class="ai-video-desc" title="${escapeHtml(desc)}">${escapeHtml(desc)}</p>
+
+      <div class="ai-player-wrapper" id="playerWrap-${v.video_id}">
+        <iframe 
+          class="tiktok-embed-frame"
+          src="https://www.tiktok.com/player/v1/${v.video_id}?autoplay=0"
+          allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; fullscreen"
+          allowfullscreen
+          loading="lazy"
+          title="TikTok player - ${v.video_id}"
+        ></iframe>
+      </div>
+
+      <div class="ai-card-actions">
+        <a href="${tiktokUrl}" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-secondary" title="Mở trang video TikTok gốc">
+          TikTok ↗
+        </a>
+        <button class="btn btn-sm btn-secondary btn-switch-player" data-video-id="${v.video_id}" data-mode="embed" title="Chuyển sang phát file MP4 cục bộ">
+          💾 Phát Local MP4
+        </button>
+        <button class="btn btn-sm btn-secondary btn-open-detail" data-video-id="${v.video_id}" title="Mở modal phân tích chi tiết">
+          🔍 Chi tiết
+        </button>
+      </div>
+    `;
+
+    elements.chat.videoList.appendChild(cardEl);
+  });
+
+  // Attach card action listeners
+  elements.chat.videoList.querySelectorAll('.btn-switch-player').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const vid = e.currentTarget.dataset.videoId;
+      const currentMode = e.currentTarget.dataset.mode;
+      const wrap = document.getElementById(`playerWrap-${vid}`);
+      if (!wrap) return;
+
+      if (currentMode === 'embed') {
+        wrap.innerHTML = `
+          <video class="local-video-player" controls autoplay playsinline preload="metadata">
+            <source src="/media/stream/${vid}" type="video/mp4">
+            Trình duyệt không hỗ trợ phát thẻ video HTML5.
+          </video>
+        `;
+        e.currentTarget.dataset.mode = 'local';
+        e.currentTarget.innerHTML = '▶️ TikTok Embed';
+        showToast(`Đang phát video ${vid} qua file MP4 cục bộ`);
+      } else {
+        wrap.innerHTML = `
+          <iframe 
+            class="tiktok-embed-frame"
+            src="https://www.tiktok.com/player/v1/${vid}?autoplay=0"
+            allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture; fullscreen"
+            allowfullscreen
+            loading="lazy"
+            title="TikTok player - ${vid}"
+          ></iframe>
+        `;
+        e.currentTarget.dataset.mode = 'embed';
+        e.currentTarget.innerHTML = '💾 Phát Local MP4';
+        showToast(`Đang nhúng TikTok Player chính thức cho video ${vid}`);
+      }
+    });
+  });
+
+  elements.chat.videoList.querySelectorAll('.btn-open-detail').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const vid = e.currentTarget.dataset.videoId;
+      openDetailModal(vid);
+    });
+  });
+
+  // Show sidebar and expand layout
+  elements.chat.videoSidebar.classList.remove('hidden');
+  if (elements.chat.workspace) {
+    elements.chat.workspace.classList.add('has-sidebar');
+  }
+  if (elements.chat.btnReopenSidebar) {
+    elements.chat.btnReopenSidebar.classList.add('hidden');
+  }
+}
+
+function appendUserMessage(text) {
+  const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const msgEl = document.createElement('div');
+  msgEl.className = 'chat-message user';
+  msgEl.innerHTML = `
+    <div class="msg-avatar">👤</div>
+    <div class="msg-body">
+      <div class="msg-header">
+        <span class="msg-time">${timeStr}</span>
+        <span class="msg-sender">Bạn</span>
+      </div>
+      <div class="msg-content">
+        <p>${escapeHtml(text)}</p>
+      </div>
+    </div>
+  `;
+  elements.chat.messages.appendChild(msgEl);
+  elements.chat.messages.scrollTop = elements.chat.messages.scrollHeight;
+}
+
+function appendThinkingMessage() {
+  const id = 'thinking-' + Date.now();
+  const msgEl = document.createElement('div');
+  msgEl.className = 'chat-message assistant';
+  msgEl.id = id;
+  msgEl.innerHTML = `
+    <div class="msg-avatar">🤖</div>
+    <div class="msg-body">
+      <div class="msg-header">
+        <span class="msg-sender">TikTok Analytics AI</span>
+        <span class="msg-time">Đang truy vấn database...</span>
+      </div>
+      <div class="msg-content thinking-bubble">
+        <div class="thinking-dots">
+          <span></span><span></span><span></span>
+        </div>
+      </div>
+    </div>
+  `;
+  elements.chat.messages.appendChild(msgEl);
+  elements.chat.messages.scrollTop = elements.chat.messages.scrollHeight;
+  return id;
+}
+
+function removeThinkingMessage(id) {
+  const el = document.getElementById(id);
+  if (el) el.remove();
+}
+
+function appendAssistantMessage(markdownText, intent, relatedVideos = []) {
+  const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const msgEl = document.createElement('div');
+  msgEl.className = 'chat-message assistant';
+  const htmlContent = renderMarkdownToHtml(markdownText);
+  const msgId = 'msg-' + Date.now();
+
+  let deckActionHtml = '';
+  if (relatedVideos && relatedVideos.length > 0) {
+    deckActionHtml = `
+      <div class="chat-deck-action-row">
+        <button class="chat-action-deck-chip" id="btnFocusDeck-${msgId}">
+          🎬 Đã mở ${relatedVideos.length} video trên khung phát TikTok (Bên phải) ↗
+        </button>
+      </div>
+    `;
+  }
+
+  msgEl.innerHTML = `
+    <div class="msg-avatar">🤖</div>
+    <div class="msg-body">
+      <div class="msg-header">
+        <span class="msg-sender">TikTok Analytics AI</span>
+        <span class="msg-time">${timeStr}</span>
+        ${intent ? `<span class="badge" style="font-size:0.68rem; padding: 1px 6px;">${intent}</span>` : ''}
+      </div>
+      <div class="msg-content">
+        ${htmlContent}
+        ${deckActionHtml}
+      </div>
+    </div>
+  `;
+  elements.chat.messages.appendChild(msgEl);
+  elements.chat.messages.scrollTop = elements.chat.messages.scrollHeight;
+
+  // Add click handler to deck focus button
+  if (relatedVideos && relatedVideos.length > 0) {
+    const btn = document.getElementById(`btnFocusDeck-${msgId}`);
+    if (btn) {
+      btn.addEventListener('click', () => {
+        displayAiVideoDeck(relatedVideos, 'Video Được Đề Cập');
+        if (elements.chat.videoSidebar) {
+          elements.chat.videoSidebar.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+      });
+    }
+  }
+}
+
+function renderMarkdownToHtml(md) {
+  if (!md) return '';
+
+  const lines = md.split('\n');
+  const out = [];
+  let inTable = false;
+  let tableHeaderParsed = false;
+  let inList = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i];
+    const trimmed = rawLine.trim();
+
+    // Table handling
+    if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+      if (!inTable) {
+        if (inList) { out.push('</ul>'); inList = false; }
+        inTable = true;
+        tableHeaderParsed = false;
+        const cells = trimmed.slice(1, -1).split('|').map(c => c.trim());
+        out.push('<table><thead><tr>' + cells.map(c => `<th>${inlineFormat(c)}</th>`).join('') + '</tr></thead><tbody>');
+        continue;
+      } else if (!tableHeaderParsed && trimmed.includes('---')) {
+        tableHeaderParsed = true;
+        continue;
+      } else {
+        const cells = trimmed.slice(1, -1).split('|').map(c => c.trim());
+        out.push('<tr>' + cells.map(c => `<td>${inlineFormat(c)}</td>`).join('') + '</tr>');
+        continue;
+      }
+    } else if (inTable) {
+      out.push('</tbody></table>');
+      inTable = false;
+    }
+
+    // List handling
+    if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+      if (!inList) {
+        out.push('<ul>');
+        inList = true;
+      }
+      out.push(`<li>${inlineFormat(trimmed.slice(2))}</li>`);
+      continue;
+    } else if (inList && trimmed === '') {
+      out.push('</ul>');
+      inList = false;
+    }
+
+    if (!trimmed) {
+      continue;
+    }
+
+    // Headers
+    if (trimmed.startsWith('#### ')) {
+      out.push(`<h4>${inlineFormat(trimmed.slice(5))}</h4>`);
+    } else if (trimmed.startsWith('### ')) {
+      out.push(`<h3>${inlineFormat(trimmed.slice(4))}</h3>`);
+    } else if (trimmed.startsWith('## ')) {
+      out.push(`<h2>${inlineFormat(trimmed.slice(3))}</h2>`);
+    } else if (trimmed.startsWith('> ')) {
+      out.push(`<blockquote>${inlineFormat(trimmed.slice(2))}</blockquote>`);
+    } else if (trimmed.startsWith('---')) {
+      out.push('<hr>');
+    } else {
+      out.push(`<p>${inlineFormat(trimmed)}</p>`);
+    }
+  }
+
+  if (inTable) out.push('</tbody></table>');
+  if (inList) out.push('</ul>');
+
+  return out.join('\n');
+}
+
+function inlineFormat(text) {
+  return text
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+}
+
+// ─── AI Config Settings Modal Handlers ──────────────────────
+
+function initAiConfigEvents() {
+  const { aiConfig } = elements;
+  if (!aiConfig.btnOpen || !aiConfig.backdrop) return;
+
+  const presets = {
+    offline: {
+      url: 'https://api.openai.com/v1',
+      model: 'gpt-4o-mini',
+      key: '',
+      embed: '',
+    },
+    openai: {
+      url: 'https://api.openai.com/v1',
+      model: 'gpt-4o-mini',
+      embed: 'text-embedding-3-small',
+    },
+    gemini: {
+      url: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+      model: 'gemini-2.0-flash',
+      embed: '',
+    },
+    deepseek: {
+      url: 'https://api.deepseek.com/v1',
+      model: 'deepseek-chat',
+      embed: '',
+    },
+    groq: {
+      url: 'https://api.groq.com/openai/v1',
+      model: 'llama-3.3-70b-versatile',
+      embed: '',
+    },
+    ollama: {
+      url: 'http://localhost:11434/v1',
+      model: 'qwen2.5:7b',
+      key: 'ollama',
+      embed: '',
+    },
+  };
+
+  async function openModal() {
+    try {
+      const res = await fetch('/api/rag/config');
+      if (res.ok) {
+        const data = await res.json();
+        aiConfig.llmBaseUrl.value = data.llmBaseUrl || '';
+        aiConfig.llmModel.value = data.llmModel || '';
+        aiConfig.llmApiKey.value = '';
+        aiConfig.llmApiKey.placeholder = data.hasLlmApiKey ? `Đã lưu key: ${data.llmApiKeyMasked}` : 'sk-... (để trống nếu dùng Offline Engine)';
+        aiConfig.embeddingModel.value = data.embeddingModel || '';
+      }
+    } catch {}
+    aiConfig.backdrop.classList.remove('hidden');
+  }
+
+  function closeModal() {
+    aiConfig.backdrop.classList.add('hidden');
+  }
+
+  aiConfig.btnOpen.addEventListener('click', openModal);
+  aiConfig.closeBtn.addEventListener('click', closeModal);
+  aiConfig.btnCancel.addEventListener('click', closeModal);
+  aiConfig.backdrop.addEventListener('click', (e) => {
+    if (e.target === aiConfig.backdrop) closeModal();
+  });
+
+  // Preset Chips
+  aiConfig.presetChips.forEach((chip) => {
+    chip.addEventListener('click', () => {
+      aiConfig.presetChips.forEach((c) => c.classList.remove('active'));
+      chip.classList.add('active');
+      const p = chip.getAttribute('data-provider');
+      const cfg = presets[p];
+      if (cfg) {
+        aiConfig.llmBaseUrl.value = cfg.url;
+        aiConfig.llmModel.value = cfg.model;
+        if (cfg.key !== undefined) {
+          aiConfig.llmApiKey.value = cfg.key;
+        }
+        if (cfg.embed !== undefined) {
+          aiConfig.embeddingModel.value = cfg.embed;
+        }
+      }
+    });
+  });
+
+  // Save Config
+  aiConfig.form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const payload = {
+      llmBaseUrl: aiConfig.llmBaseUrl.value.trim(),
+      llmModel: aiConfig.llmModel.value.trim(),
+      embeddingModel: aiConfig.embeddingModel.value.trim(),
+    };
+    if (aiConfig.llmApiKey.value.trim() !== '') {
+      payload.llmApiKey = aiConfig.llmApiKey.value.trim();
+    }
+
+    try {
+      const res = await fetch('/api/rag/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        showToast(data.message || 'Đã lưu cấu hình AI thành công!');
+        closeModal();
+      } else {
+        showToast(`Lỗi: ${data.error}`);
+      }
+    } catch (err) {
+      showToast(`Lỗi khi lưu cấu hình: ${err.message}`);
+    }
+  });
+}
+
 // Initial Execution
 document.addEventListener('DOMContentLoaded', () => {
   initEvents();
+  initMainTabs();
+  initChatEvents();
+  initAiConfigEvents();
   fetchVideos();
+  fetchSystemInfo();
 });

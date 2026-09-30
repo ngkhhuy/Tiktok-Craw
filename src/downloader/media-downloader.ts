@@ -12,6 +12,28 @@ export interface DownloadResult {
   sha256: string;
 }
 
+async function safeRename(source: string, destination: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await fs.promises.rename(source, destination);
+      return;
+    } catch (err: any) {
+      if ((err.code === 'EPERM' || err.code === 'EBUSY' || err.code === 'EACCES') && attempt < 4) {
+        await new Promise((r) => setTimeout(r, 40 * (attempt + 1)));
+      } else if (attempt === 4) {
+        try {
+          await fs.promises.copyFile(source, destination);
+          await fs.promises.unlink(source).catch(() => {});
+          return;
+        } catch {}
+        throw err;
+      } else {
+        throw err;
+      }
+    }
+  }
+}
+
 export class MediaDownloader {
   async downloadVideo(
     mediaUrl: string,
@@ -84,8 +106,8 @@ export class MediaDownloader {
       // Calculate SHA-256
       const sha256 = await calculateFileSha256(partPath);
 
-      // Atomic rename: .part -> final file
-      await fs.promises.rename(partPath, outputPath);
+      // Atomic rename: .part -> final file with Windows lock retry
+      await safeRename(partPath, outputPath);
       logger.stage('video', `Download complete: ${stats.size} bytes, SHA-256: ${sha256}`);
 
       return {
@@ -143,7 +165,7 @@ export class MediaDownloader {
         return false;
       }
 
-      await fs.promises.rename(partPath, outputPath);
+      await safeRename(partPath, outputPath);
       logger.stage('thumbnail', `Thumbnail downloaded: ${stats.size} bytes`);
       return true;
     } catch (err: any) {

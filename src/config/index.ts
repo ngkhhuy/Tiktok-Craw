@@ -1,8 +1,11 @@
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 
 dotenv.config();
+
+const detectedCpuThreads = Math.max(4, os.cpus()?.length || 16);
 
 function getEnvNumber(key: string, defaultValue: number): number {
   const val = process.env[key];
@@ -57,8 +60,8 @@ function detectFfmpegPath(): string {
 }
 
 export const config = {
-  videoConcurrency: getEnvNumber('TIKTOK_VIDEO_CONCURRENCY', 5),
-  commentConcurrency: getEnvNumber('TIKTOK_COMMENT_CONCURRENCY', 2),
+  videoConcurrency: getEnvNumber('TIKTOK_VIDEO_CONCURRENCY', detectedCpuThreads),
+  commentConcurrency: getEnvNumber('TIKTOK_COMMENT_CONCURRENCY', Math.min(8, Math.ceil(detectedCpuThreads / 2))),
   requestDelayMs: getEnvNumber('TIKTOK_REQUEST_DELAY_MS', 300),
   mediaRequestDelayMs: getEnvNumber('TIKTOK_MEDIA_REQUEST_DELAY_MS', 50),
   maxCommentsPerVideo: getEnvNumber('MAX_COMMENTS_PER_VIDEO', 1000),
@@ -75,4 +78,11 @@ export const config = {
   userAgentMobile:
     process.env.USER_AGENT_MOBILE ||
     'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1',
+  llmApiKey: process.env.LLM_API_KEY || '',
+  llmBaseUrl: process.env.LLM_BASE_URL || 'https://api.openai.com/v1',
+  llmModel: process.env.LLM_MODEL || 'gpt-4o-mini',
+  embeddingApiKey: process.env.EMBEDDING_API_KEY || '',
+  embeddingBaseUrl: process.env.EMBEDDING_BASE_URL || 'https://api.openai.com/v1',
+  embeddingModel: process.env.EMBEDDING_MODEL || 'text-embedding-3-small',
+  ragDebug: getEnvBoolean('RAG_DEBUG', false),
 };

@@ -103,63 +103,74 @@ export async function initProfileCrawlManifest(
   return newManifest;
 }
 
+const profileManifestQueues = new Map<string, Promise<any>>();
+
 export async function updateProfileCrawlVideo(
   profileId: string,
   videoId: string,
   status: StageStatus,
   error?: string
 ): Promise<void> {
-  const profileDir = localStorage.getProfileDir(profileId);
-  const manifestPath = path.join(profileDir, 'crawl-manifest.json');
-  const manifest = await localStorage.readJson<ProfileCrawlManifest>(manifestPath);
+  const currentQueue = profileManifestQueues.get(profileId) || Promise.resolve();
+  const nextPromise = currentQueue.then(async () => {
+    const profileDir = localStorage.getProfileDir(profileId);
+    const manifestPath = path.join(profileDir, 'crawl-manifest.json');
+    const manifest = await localStorage.readJson<ProfileCrawlManifest>(manifestPath);
 
-  if (!manifest) return;
+    if (!manifest) return;
 
-  const now = new Date().toISOString();
-  const existing = manifest.videos[videoId] || { attempts: 0, status: 'pending' };
+    const now = new Date().toISOString();
+    const existing = manifest.videos[videoId] || { attempts: 0, status: 'pending' };
 
-  manifest.videos[videoId] = {
-    status,
-    attempts: existing.attempts + 1,
-    started_at: existing.started_at || now,
-    completed_at: status === 'completed' || status === 'failed' || status === 'skipped' ? now : undefined,
-    error,
-  };
+    manifest.videos[videoId] = {
+      status,
+      attempts: existing.attempts + 1,
+      started_at: existing.started_at || now,
+      completed_at: status === 'completed' || status === 'failed' || status === 'skipped' ? now : undefined,
+      error,
+    };
 
-  // Recompute stats
-  let completed = 0;
-  let skipped = 0;
-  let failed = 0;
-  let pending = 0;
+    // Recompute stats
+    let completed = 0;
+    let skipped = 0;
+    let failed = 0;
+    let pending = 0;
 
-  for (const v of Object.values(manifest.videos)) {
-    if (v.status === 'completed') completed++;
-    else if (v.status === 'skipped') skipped++;
-    else if (v.status === 'failed') failed++;
-    else pending++;
-  }
+    for (const v of Object.values(manifest.videos)) {
+      if (v.status === 'completed') completed++;
+      else if (v.status === 'skipped') skipped++;
+      else if (v.status === 'failed') failed++;
+      else pending++;
+    }
 
-  manifest.stats.completed = completed;
-  manifest.stats.skipped = skipped;
-  manifest.stats.failed = failed;
-  manifest.stats.pending = Math.max(0, manifest.stats.discovered - completed - skipped - failed);
-  manifest.updated_at = now;
+    manifest.stats.completed = completed;
+    manifest.stats.skipped = skipped;
+    manifest.stats.failed = failed;
+    manifest.stats.pending = Math.max(0, manifest.stats.discovered - completed - skipped - failed);
+    manifest.updated_at = now;
 
-  await localStorage.writeJson(manifestPath, manifest);
+    await localStorage.writeJson(manifestPath, manifest);
+  }).catch(() => {});
+
+  profileManifestQueues.set(profileId, nextPromise);
+  await nextPromise;
 }
 
 export async function finalizeProfileCrawl(
   profileId: string,
   status: 'completed' | 'interrupted' | 'failed' = 'completed'
 ): Promise<ProfileCrawlManifest | null> {
-  const profileDir = localStorage.getProfileDir(profileId);
-  const manifestPath = path.join(profileDir, 'crawl-manifest.json');
-  const manifest = await localStorage.readJson<ProfileCrawlManifest>(manifestPath);
+  const currentQueue = profileManifestQueues.get(profileId) || Promise.resolve();
+  return await currentQueue.then(async () => {
+    const profileDir = localStorage.getProfileDir(profileId);
+    const manifestPath = path.join(profileDir, 'crawl-manifest.json');
+    const manifest = await localStorage.readJson<ProfileCrawlManifest>(manifestPath);
 
-  if (!manifest) return null;
+    if (!manifest) return null;
 
-  manifest.status = status;
-  manifest.updated_at = new Date().toISOString();
-  await localStorage.writeJson(manifestPath, manifest);
-  return manifest;
+    manifest.status = status;
+    manifest.updated_at = new Date().toISOString();
+    await localStorage.writeJson(manifestPath, manifest);
+    return manifest;
+  });
 }

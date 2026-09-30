@@ -105,4 +105,49 @@ describe('TikTok Dataset Server API & Static Tests', () => {
     assert.strictEqual(thumbRes.status, 200);
     assert.strictEqual(thumbRes.headers.get('content-type'), 'image/jpeg');
   });
+
+  it('should answer questions via POST /api/rag/query', async () => {
+    const res = await fetch(`${BASE_URL}/api/rag/query`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'Top 3 video nhiều view nhất' }),
+    });
+    assert.strictEqual(res.status, 200);
+    const data = await res.json();
+    assert.strictEqual(data.intent, 'RANKING');
+    assert.ok(data.answer.includes('Top 3'));
+    assert.ok(data.sessionId);
+    assert.ok(data.sources.videosAnalyzed > 0);
+  });
+
+  it('should return dataset baseline via GET /api/analytics/baseline', async () => {
+    const res = await fetch(`${BASE_URL}/api/analytics/baseline?population=all_videos`);
+    assert.strictEqual(res.status, 200);
+    const data = await res.json();
+    assert.strictEqual(data.population, 'all_videos');
+    assert.ok(data.total_videos > 0);
+    assert.ok(data.metrics.views.median > 0);
+  });
+
+  it('should inspect and clear session via /api/rag/sessions/:id', async () => {
+    // 1. Send query to create session
+    const qRes = await fetch(`${BASE_URL}/api/rag/query`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'Có bao nhiêu video trong database?' }),
+    });
+    const qData = await qRes.json();
+    const sessionId = qData.sessionId;
+
+    // 2. Fetch session
+    const sRes = await fetch(`${BASE_URL}/api/rag/sessions/${sessionId}`);
+    assert.strictEqual(sRes.status, 200);
+    const sData = await sRes.json();
+    assert.strictEqual(sData.sessionId, sessionId);
+    assert.ok(sData.history.length >= 2);
+
+    // 3. Clear session
+    const delRes = await fetch(`${BASE_URL}/api/rag/sessions/${sessionId}`, { method: 'DELETE' });
+    assert.strictEqual(delRes.status, 200);
+  });
 });

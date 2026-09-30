@@ -14,6 +14,7 @@ import { logger } from '../utils/logger.js';
 import { config } from '../config/index.js';
 import { VideoManifest } from '../storage/types.js';
 import { NormalizedTikTokVideo } from '../acquisition/tiktok/types.js';
+import { mediaResolver } from '../acquisition/tiktok/media-resolver.js';
 import { upsertVideo } from '../storage/database.js';
 
 export interface VideoCrawlerOptions {
@@ -154,163 +155,196 @@ export class VideoCrawler {
         return { videoId, status: 'completed', videoDir, manifest };
       }
 
-      // 4. Download Video (or Photo Mode Slideshow)
-      const needVideo = options.force || !fs.existsSync(videoFile) || fs.statSync(videoFile).size === 0;
+      // 4. Resolve Media URL if missing (e.g. TikTok Shop / restricted videos)
+      let mediaUrl = metadata?.media?.video_url;
+      let isPhotoMode = Boolean(
+        metadata?.media?.is_photo_mode ||
+        (metadata?.media?.images && metadata.media.images.length > 0) ||
+        metadata?.platform_specific?.imagePost
+      );
+
+      if (!mediaUrl && !isPhotoMode) {
+        logger.stage('video', `Media URL missing for ${videoId}, triggering fallback resolver...`);
+        const resolved = await mediaResolver.resolveMedia(targetUrl, videoId);
+        if (resolved?.video_url) {
+          mediaUrl = resolved.video_url;
+          metadata.media = metadata.media || {};
+          metadata.media.video_url = resolved.video_url;
+          if (resolved.music_url && !metadata.media.music_url) {
+            metadata.media.music_url = resolved.music_url;
+          }
+          await localStorage.writeJson(metadataFile, metadata);
+        } else if (resolved?.images && resolved.images.length > 0) {
+          metadata.media = metadata.media || {};
+          metadata.media.images = resolved.images;
+          metadata.media.is_photo_mode = true;
+          isPhotoMode = true;
+          if (resolved.music_url && !metadata.media.music_url) {
+            metadata.media.music_url = resolved.music_url;
+          }
+          await localStorage.writeJson(metadataFile, metadata);
+        }
+      }
+
+      if (!mediaUrl && !isPhotoMode) {
+        throw new Error(`No media video URL found for video ${videoId}`);
+      }
+
       let sha256Val = manifest.hash?.value;
 
-      if (needVideo) {
-        manifest.stages.video.started_at = new Date().toISOString();
-        const mediaUrl = metadata?.media?.video_url;
-        const isPhotoMode = Boolean(
-          metadata?.media?.is_photo_mode ||
-          (metadata?.media?.images && metadata.media.images.length > 0) ||
-          metadata?.platform_specific?.imagePost
-        );
+      // Pipeline Task A: Video Download (or Slideshow) -> FFprobe -> Hash
+      const videoPipeline = async () => {
+        const needVideo = options.force || !fs.existsSync(videoFile) || fs.statSync(videoFile).size === 0;
 
-        if (!mediaUrl && !isPhotoMode) {
-          throw new Error(`No media video URL found for video ${videoId}`);
+        if (needVideo) {
+          manifest.stages.video.started_at = new Date().toISOString();
+
+          if (isPhotoMode && !mediaUrl) {
+            // Photo Mode (Slideshow / Image Carousel) Processing
+            logger.stage('video', `Processing Photo Mode (slideshow) for item ${videoId}`);
+            const photoImages: string[] = metadata?.media?.images && metadata.media.images.length > 0
+              ? metadata.media.images
+              : (metadata?.platform_specific?.imagePost?.images || []).map((img: any) =>
+                  img.imageURL?.urlList?.[0] || img.imageURL?.urlList?.[1] || img.display_image?.url_list?.[0]
+                ).filter(Boolean);
+
+            const imagesDir = path.join(videoDir, 'images');
+            await localStorage.ensureDir(imagesDir);
+
+            const downloadedImages: string[] = [];
+            for (let i = 0; i < photoImages.length; i++) {
+              const imgPath = path.join(imagesDir, `img_${i}.jpg`);
+              await mediaDownloader.downloadThumbnail(photoImages[i], imgPath, { referer: targetUrl });
+              if (fs.existsSync(imgPath) && fs.statSync(imgPath).size > 0) {
+                downloadedImages.push(imgPath);
+              }
+            }
+
+            // Download music audio if available
+            let audioFile: string | null = null;
+            const musicUrl = metadata?.media?.music_url || metadata?.platform_specific?.music?.playUrl;
+            if (musicUrl) {
+              try {
+                const audioPath = path.join(videoDir, 'audio.mp3');
+                const aRes = await fetch(musicUrl);
+                if (aRes.ok) {
+                  const buf = Buffer.from(await aRes.arrayBuffer());
+                  fs.writeFileSync(audioPath, buf);
+                  audioFile = audioPath;
+                }
+              } catch (err: any) {
+                logger.debug(`Could not download music for photo mode: ${err.message}`);
+              }
+            }
+
+            // Generate playable MP4 slideshow via FFmpeg
+            await buildSlideshowMp4(downloadedImages, audioFile, videoFile);
+
+            const { calculateFileSha256 } = await import('../downloader/hash.js');
+            sha256Val = await calculateFileSha256(videoFile);
+            manifest.stages.video.status = 'completed';
+            manifest.stages.video.completed_at = new Date().toISOString();
+            manifest.files.video = 'video.mp4';
+            logger.videoProgress(videoId, 'video', 'success', `slideshow (${(fs.statSync(videoFile).size / 1024 / 1024).toFixed(2)} MB)`);
+
+            manifest.stages.hash.status = 'completed';
+            manifest.stages.hash.completed_at = new Date().toISOString();
+            manifest.hash = { algorithm: 'sha256', value: sha256Val };
+            logger.videoProgress(videoId, 'sha256', 'success', sha256Val.slice(0, 12) + '...');
+          } else {
+            // Regular MP4 Video Download
+            const downloadRes = await mediaDownloader.downloadVideo(mediaUrl!, videoFile, {
+              cookies: metadata?.cookies,
+              referer: targetUrl,
+            });
+
+            sha256Val = downloadRes.sha256;
+            manifest.stages.video.status = 'completed';
+            manifest.stages.video.completed_at = new Date().toISOString();
+            manifest.files.video = 'video.mp4';
+            logger.videoProgress(videoId, 'video', 'success', `${(downloadRes.bytesDownloaded / 1024 / 1024).toFixed(2)} MB`);
+
+            manifest.stages.hash.status = 'completed';
+            manifest.stages.hash.completed_at = new Date().toISOString();
+            manifest.hash = { algorithm: 'sha256', value: sha256Val };
+            logger.videoProgress(videoId, 'sha256', 'success', sha256Val.slice(0, 12) + '...');
+          }
+        } else {
+          logger.videoProgress(videoId, 'video', 'skipped', 'already downloaded');
+          if (!manifest.hash && fs.existsSync(videoFile)) {
+            const { calculateFileSha256 } = await import('../downloader/hash.js');
+            sha256Val = await calculateFileSha256(videoFile);
+            manifest.hash = { algorithm: 'sha256', value: sha256Val };
+          }
+          logger.videoProgress(videoId, 'sha256', 'success');
         }
 
-        if (isPhotoMode && !mediaUrl) {
-          // Photo Mode (Slideshow / Image Carousel) Processing
-          logger.stage('video', `Processing Photo Mode (slideshow) for item ${videoId}`);
-          const photoImages: string[] = metadata?.media?.images && metadata.media.images.length > 0
-            ? metadata.media.images
-            : (metadata?.platform_specific?.imagePost?.images || []).map((img: any) =>
-                img.imageURL?.urlList?.[0] || img.imageURL?.urlList?.[1] || img.display_image?.url_list?.[0]
-              ).filter(Boolean);
+        // FFprobe Technical Metadata Analysis
+        const needTech = options.force || !fs.existsSync(technicalFile);
+        if (needTech && fs.existsSync(videoFile)) {
+          manifest.stages.technical.started_at = new Date().toISOString();
+          const techData = await runFfprobe(videoFile);
+          await localStorage.writeJson(technicalFile, techData);
+          manifest.stages.technical.status = 'completed';
+          manifest.stages.technical.completed_at = new Date().toISOString();
+          manifest.files.technical = 'technical.json';
+          logger.videoProgress(videoId, 'technical', 'success', `${techData.width}x${techData.height} ${techData.fps}fps`);
+        } else if (fs.existsSync(technicalFile)) {
+          logger.videoProgress(videoId, 'technical', 'skipped', 'cached');
+        }
+      };
 
-          const imagesDir = path.join(videoDir, 'images');
-          await localStorage.ensureDir(imagesDir);
-
-          const downloadedImages: string[] = [];
-          for (let i = 0; i < photoImages.length; i++) {
-            const imgPath = path.join(imagesDir, `img_${i}.jpg`);
-            await mediaDownloader.downloadThumbnail(photoImages[i], imgPath, { referer: targetUrl });
-            if (fs.existsSync(imgPath) && fs.statSync(imgPath).size > 0) {
-              downloadedImages.push(imgPath);
-            }
-          }
-
-          // Download music audio if available
-          let audioFile: string | null = null;
-          const musicUrl = metadata?.media?.music_url || metadata?.platform_specific?.music?.playUrl;
-          if (musicUrl) {
-            try {
-              const audioPath = path.join(videoDir, 'audio.mp3');
-              const aRes = await fetch(musicUrl);
-              if (aRes.ok) {
-                const buf = Buffer.from(await aRes.arrayBuffer());
-                fs.writeFileSync(audioPath, buf);
-                audioFile = audioPath;
-              }
-            } catch (err: any) {
-              logger.debug(`Could not download music for photo mode: ${err.message}`);
-            }
-          }
-
-          // Generate playable MP4 slideshow via FFmpeg
-          await buildSlideshowMp4(downloadedImages, audioFile, videoFile);
-
-          const { calculateFileSha256 } = await import('../downloader/hash.js');
-          sha256Val = await calculateFileSha256(videoFile);
-          manifest.stages.video.status = 'completed';
-          manifest.stages.video.completed_at = new Date().toISOString();
-          manifest.files.video = 'video.mp4';
-          logger.videoProgress(videoId, 'video', 'success', `slideshow (${(fs.statSync(videoFile).size / 1024 / 1024).toFixed(2)} MB)`);
-
-          // Hash stage
-          manifest.stages.hash.status = 'completed';
-          manifest.stages.hash.completed_at = new Date().toISOString();
-          manifest.hash = { algorithm: 'sha256', value: sha256Val };
-          logger.videoProgress(videoId, 'sha256', 'success', sha256Val.slice(0, 12) + '...');
-        } else {
-          // Regular MP4 Video Download
-          const downloadRes = await mediaDownloader.downloadVideo(mediaUrl!, videoFile, {
-            cookies: metadata?.cookies,
+      // Pipeline Task B: Thumbnail Download
+      const thumbPipeline = async () => {
+        const needThumb = options.force || !fs.existsSync(thumbnailFile);
+        const thumbUrl = metadata?.media?.thumbnail_url || (metadata?.media?.images && metadata.media.images[0]);
+        if (needThumb && thumbUrl) {
+          manifest.stages.thumbnail.started_at = new Date().toISOString();
+          const thumbOk = await mediaDownloader.downloadThumbnail(thumbUrl, thumbnailFile, {
             referer: targetUrl,
           });
 
-          sha256Val = downloadRes.sha256;
-          manifest.stages.video.status = 'completed';
-          manifest.stages.video.completed_at = new Date().toISOString();
-          manifest.files.video = 'video.mp4';
-          logger.videoProgress(videoId, 'video', 'success', `${(downloadRes.bytesDownloaded / 1024 / 1024).toFixed(2)} MB`);
-
-          // Hash stage
-          manifest.stages.hash.status = 'completed';
-          manifest.stages.hash.completed_at = new Date().toISOString();
-          manifest.hash = { algorithm: 'sha256', value: sha256Val };
-          logger.videoProgress(videoId, 'sha256', 'success', sha256Val.slice(0, 12) + '...');
-        }
-      } else {
-        logger.videoProgress(videoId, 'video', 'skipped', 'already downloaded');
-        if (!manifest.hash && fs.existsSync(videoFile)) {
-          const { calculateFileSha256 } = await import('../downloader/hash.js');
-          sha256Val = await calculateFileSha256(videoFile);
-          manifest.hash = { algorithm: 'sha256', value: sha256Val };
-        }
-        logger.videoProgress(videoId, 'sha256', 'success');
-      }
-
-      // 5. Download Thumbnail
-      const needThumb = options.force || !fs.existsSync(thumbnailFile);
-      const thumbUrl = metadata?.media?.thumbnail_url || (metadata?.media?.images && metadata.media.images[0]);
-      if (needThumb && thumbUrl) {
-        manifest.stages.thumbnail.started_at = new Date().toISOString();
-        const thumbOk = await mediaDownloader.downloadThumbnail(thumbUrl, thumbnailFile, {
-          referer: targetUrl,
-        });
-
-        if (thumbOk) {
-          manifest.stages.thumbnail.status = 'completed';
-          manifest.stages.thumbnail.completed_at = new Date().toISOString();
-          manifest.files.thumbnail = 'thumbnail.jpg';
-          logger.videoProgress(videoId, 'thumbnail', 'success');
+          if (thumbOk) {
+            manifest.stages.thumbnail.status = 'completed';
+            manifest.stages.thumbnail.completed_at = new Date().toISOString();
+            manifest.files.thumbnail = 'thumbnail.jpg';
+            logger.videoProgress(videoId, 'thumbnail', 'success');
+          } else {
+            manifest.stages.thumbnail.status = 'unavailable';
+            logger.videoProgress(videoId, 'thumbnail', 'unavailable');
+          }
+        } else if (fs.existsSync(thumbnailFile)) {
+          logger.videoProgress(videoId, 'thumbnail', 'skipped', 'cached');
         } else {
           manifest.stages.thumbnail.status = 'unavailable';
           logger.videoProgress(videoId, 'thumbnail', 'unavailable');
         }
-      } else if (fs.existsSync(thumbnailFile)) {
-        logger.videoProgress(videoId, 'thumbnail', 'skipped', 'cached');
-      } else {
-        manifest.stages.thumbnail.status = 'unavailable';
-        logger.videoProgress(videoId, 'thumbnail', 'unavailable');
-      }
+      };
 
-      // 6. FFprobe Technical Metadata
-      const needTech = options.force || !fs.existsSync(technicalFile);
-      if (needTech && fs.existsSync(videoFile)) {
-        manifest.stages.technical.started_at = new Date().toISOString();
-        const techData = await runFfprobe(videoFile);
-        await localStorage.writeJson(technicalFile, techData);
-        manifest.stages.technical.status = 'completed';
-        manifest.stages.technical.completed_at = new Date().toISOString();
-        manifest.files.technical = 'technical.json';
-        logger.videoProgress(videoId, 'technical', 'success', `${techData.width}x${techData.height} ${techData.fps}fps`);
-      } else if (fs.existsSync(technicalFile)) {
-        logger.videoProgress(videoId, 'technical', 'skipped', 'cached');
-      }
+      // Pipeline Task C: Comments Extraction
+      const commentsPipeline = async () => {
+        const needComments = options.force || !fs.existsSync(commentsFile);
+        if (needComments) {
+          manifest.stages.comments.started_at = new Date().toISOString();
+          const commentsResult = await tiktokAcquisition.getComments(videoId, targetUrl);
+          await localStorage.writeJson(commentsFile, commentsResult);
+          manifest.stages.comments.status = commentsResult.status;
+          manifest.stages.comments.completed_at = new Date().toISOString();
+          manifest.stages.comments.count = commentsResult.comments.length;
+          manifest.files.comments = 'comments.json';
+          logger.videoProgress(
+            videoId,
+            'comments',
+            commentsResult.status === 'completed' ? 'success' : 'unavailable',
+            `${commentsResult.comments.length} comments`
+          );
+        } else {
+          logger.videoProgress(videoId, 'comments', 'skipped', 'cached');
+        }
+      };
 
-      // 7. Comments
-      const needComments = options.force || !fs.existsSync(commentsFile);
-      if (needComments) {
-        manifest.stages.comments.started_at = new Date().toISOString();
-        const commentsResult = await tiktokAcquisition.getComments(videoId, targetUrl);
-        await localStorage.writeJson(commentsFile, commentsResult);
-        manifest.stages.comments.status = commentsResult.status;
-        manifest.stages.comments.completed_at = new Date().toISOString();
-        manifest.stages.comments.count = commentsResult.comments.length;
-        manifest.files.comments = 'comments.json';
-        logger.videoProgress(
-          videoId,
-          'comments',
-          commentsResult.status === 'completed' ? 'success' : 'unavailable',
-          `${commentsResult.comments.length} comments`
-        );
-      } else {
-        logger.videoProgress(videoId, 'comments', 'skipped', 'cached');
-      }
+      // Run Video Pipeline, Thumbnail Download, and Comments Fetch simultaneously
+      await Promise.all([videoPipeline(), thumbPipeline(), commentsPipeline()]);
 
       // 8. Finalize Manifest & Index to Database
       manifest.status = 'completed';

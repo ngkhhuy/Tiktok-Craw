@@ -82,6 +82,58 @@ function initSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_videos_username ON videos(username);
     CREATE INDEX IF NOT EXISTS idx_videos_views ON videos(views DESC);
     CREATE INDEX IF NOT EXISTS idx_profiles_username ON profiles(username);
+
+    CREATE TABLE IF NOT EXISTS comments (
+      comment_id TEXT PRIMARY KEY,
+      video_id TEXT NOT NULL,
+      parent_comment_id TEXT,
+      author_id TEXT,
+      author_username TEXT,
+      author_display_name TEXT,
+      text TEXT NOT NULL,
+      like_count INTEGER DEFAULT 0,
+      reply_count INTEGER DEFAULT 0,
+      is_reply INTEGER DEFAULT 0,
+      published_at TEXT,
+      sentiment_label TEXT,
+      sentiment_score REAL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_comments_video ON comments(video_id);
+    CREATE INDEX IF NOT EXISTS idx_comments_published ON comments(published_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(parent_comment_id);
+
+    CREATE TABLE IF NOT EXISTS video_metric_snapshots (
+      snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      video_id TEXT NOT NULL,
+      captured_at TEXT NOT NULL,
+      views INTEGER DEFAULT 0,
+      likes INTEGER DEFAULT 0,
+      comments_count INTEGER DEFAULT 0,
+      shares INTEGER DEFAULT 0,
+      saves INTEGER DEFAULT 0,
+      like_rate REAL,
+      comment_rate REAL,
+      share_rate REAL,
+      engagement_rate REAL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_snapshots_video_time ON video_metric_snapshots(video_id, captured_at DESC);
+
+    CREATE TABLE IF NOT EXISTS vector_embeddings (
+      embedding_id TEXT PRIMARY KEY,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      chunk_text TEXT NOT NULL,
+      embedding BLOB NOT NULL,
+      dimensions INTEGER NOT NULL,
+      model TEXT NOT NULL,
+      metadata_json TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_embeddings_entity ON vector_embeddings(entity_type, entity_id);
   `);
 }
 
@@ -245,6 +297,302 @@ export function upsertProfile(record: {
   });
 }
 
+// ─── Comment CRUD ────────────────────────────────────────────
+
+export interface CommentRecord {
+  comment_id: string;
+  video_id: string;
+  parent_comment_id?: string | null;
+  author_id?: string | null;
+  author_username?: string | null;
+  author_display_name?: string | null;
+  text: string;
+  like_count?: number;
+  reply_count?: number;
+  is_reply?: boolean | number;
+  published_at?: string | null;
+  sentiment_label?: string | null;
+  sentiment_score?: number | null;
+  created_at?: string;
+}
+
+export function upsertComment(record: CommentRecord): void {
+  const db = getDb();
+  const now = record.created_at || new Date().toISOString();
+  const stmt = db.prepare(`
+    INSERT INTO comments (
+      comment_id, video_id, parent_comment_id, author_id,
+      author_username, author_display_name, text, like_count,
+      reply_count, is_reply, published_at, sentiment_label,
+      sentiment_score, created_at
+    ) VALUES (
+      @comment_id, @video_id, @parent_comment_id, @author_id,
+      @author_username, @author_display_name, @text, @like_count,
+      @reply_count, @is_reply, @published_at, @sentiment_label,
+      @sentiment_score, @created_at
+    )
+    ON CONFLICT(comment_id) DO UPDATE SET
+      text = @text,
+      like_count = CASE WHEN @like_count > 0 THEN @like_count ELSE like_count END,
+      reply_count = CASE WHEN @reply_count > 0 THEN @reply_count ELSE reply_count END,
+      sentiment_label = COALESCE(@sentiment_label, sentiment_label),
+      sentiment_score = COALESCE(@sentiment_score, sentiment_score)
+  `);
+
+  stmt.run({
+    comment_id: record.comment_id,
+    video_id: record.video_id,
+    parent_comment_id: record.parent_comment_id || null,
+    author_id: record.author_id || null,
+    author_username: record.author_username || null,
+    author_display_name: record.author_display_name || null,
+    text: record.text || '',
+    like_count: record.like_count || 0,
+    reply_count: record.reply_count || 0,
+    is_reply: record.is_reply ? 1 : 0,
+    published_at: record.published_at || null,
+    sentiment_label: record.sentiment_label || null,
+    sentiment_score: record.sentiment_score ?? null,
+    created_at: now,
+  });
+}
+
+export function upsertCommentsBatch(records: CommentRecord[]): number {
+  if (!records || records.length === 0) return 0;
+  const db = getDb();
+  const now = new Date().toISOString();
+  const stmt = db.prepare(`
+    INSERT INTO comments (
+      comment_id, video_id, parent_comment_id, author_id,
+      author_username, author_display_name, text, like_count,
+      reply_count, is_reply, published_at, sentiment_label,
+      sentiment_score, created_at
+    ) VALUES (
+      @comment_id, @video_id, @parent_comment_id, @author_id,
+      @author_username, @author_display_name, @text, @like_count,
+      @reply_count, @is_reply, @published_at, @sentiment_label,
+      @sentiment_score, @created_at
+    )
+    ON CONFLICT(comment_id) DO UPDATE SET
+      text = @text,
+      like_count = CASE WHEN @like_count > 0 THEN @like_count ELSE like_count END,
+      reply_count = CASE WHEN @reply_count > 0 THEN @reply_count ELSE reply_count END,
+      sentiment_label = COALESCE(@sentiment_label, sentiment_label),
+      sentiment_score = COALESCE(@sentiment_score, sentiment_score)
+  `);
+
+  const runBatch = db.transaction((items: CommentRecord[]) => {
+    let count = 0;
+    for (const r of items) {
+      stmt.run({
+        comment_id: r.comment_id,
+        video_id: r.video_id,
+        parent_comment_id: r.parent_comment_id && r.parent_comment_id !== '0' ? r.parent_comment_id : null,
+        author_id: r.author_id || null,
+        author_username: r.author_username || null,
+        author_display_name: r.author_display_name || null,
+        text: r.text || '',
+        like_count: r.like_count || 0,
+        reply_count: r.reply_count || 0,
+        is_reply: r.is_reply ? 1 : 0,
+        published_at: r.published_at || null,
+        sentiment_label: r.sentiment_label || null,
+        sentiment_score: r.sentiment_score ?? null,
+        created_at: r.created_at || now,
+      });
+      count++;
+    }
+    return count;
+  });
+
+  return runBatch(records);
+}
+
+export function getCommentsByVideoId(videoId: string, limit: number = 100): CommentRecord[] {
+  const db = getDb();
+  return db.prepare(`
+    SELECT * FROM comments WHERE video_id = ? ORDER BY like_count DESC, published_at DESC LIMIT ?
+  `).all(videoId, limit) as CommentRecord[];
+}
+
+export function searchComments(query: string, limit: number = 50): CommentRecord[] {
+  const db = getDb();
+  return db.prepare(`
+    SELECT * FROM comments WHERE text LIKE ? ORDER BY like_count DESC LIMIT ?
+  `).all(`%${query}%`, limit) as CommentRecord[];
+}
+
+export function countComments(videoId?: string): number {
+  const db = getDb();
+  if (videoId) {
+    const row = db.prepare('SELECT COUNT(*) as cnt FROM comments WHERE video_id = ?').get(videoId) as any;
+    return row?.cnt || 0;
+  }
+  const row = db.prepare('SELECT COUNT(*) as cnt FROM comments').get() as any;
+  return row?.cnt || 0;
+}
+
+// ─── Metric Snapshots CRUD ───────────────────────────────────
+
+export interface MetricSnapshotRecord {
+  snapshot_id?: number;
+  video_id: string;
+  captured_at: string;
+  views: number;
+  likes: number;
+  comments_count: number;
+  shares: number;
+  saves: number;
+  like_rate?: number | null;
+  comment_rate?: number | null;
+  share_rate?: number | null;
+  engagement_rate?: number | null;
+}
+
+export function insertMetricSnapshot(record: MetricSnapshotRecord): void {
+  const db = getDb();
+  const v = record.views || 0;
+  const l = record.likes || 0;
+  const c = record.comments_count || 0;
+  const s = record.shares || 0;
+  const likeRate = v > 0 ? l / v : null;
+  const commentRate = v > 0 ? c / v : null;
+  const shareRate = v > 0 ? s / v : null;
+  const engagementRate = v > 0 ? (l + c + s) / v : null;
+
+  db.prepare(`
+    INSERT INTO video_metric_snapshots (
+      video_id, captured_at, views, likes, comments_count,
+      shares, saves, like_rate, comment_rate, share_rate, engagement_rate
+    ) VALUES (
+      ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    )
+  `).run(
+    record.video_id,
+    record.captured_at || new Date().toISOString(),
+    v,
+    l,
+    c,
+    s,
+    record.saves || 0,
+    record.like_rate ?? likeRate,
+    record.comment_rate ?? commentRate,
+    record.share_rate ?? shareRate,
+    record.engagement_rate ?? engagementRate
+  );
+}
+
+export function getMetricSnapshots(videoId: string): MetricSnapshotRecord[] {
+  const db = getDb();
+  return db.prepare(`
+    SELECT * FROM video_metric_snapshots WHERE video_id = ? ORDER BY captured_at ASC
+  `).all(videoId) as MetricSnapshotRecord[];
+}
+
+// ─── Vector Embeddings CRUD ──────────────────────────────────
+
+export interface VectorEmbeddingRecord {
+  embedding_id: string;
+  entity_type: string;
+  entity_id: string;
+  chunk_text: string;
+  embedding: Buffer;
+  dimensions: number;
+  model: string;
+  metadata_json?: string | null;
+  created_at?: string;
+}
+
+export function upsertVectorEmbedding(record: VectorEmbeddingRecord): void {
+  const db = getDb();
+  const now = record.created_at || new Date().toISOString();
+  db.prepare(`
+    INSERT INTO vector_embeddings (
+      embedding_id, entity_type, entity_id, chunk_text,
+      embedding, dimensions, model, metadata_json, created_at
+    ) VALUES (
+      @embedding_id, @entity_type, @entity_id, @chunk_text,
+      @embedding, @dimensions, @model, @metadata_json, @created_at
+    )
+    ON CONFLICT(embedding_id) DO UPDATE SET
+      chunk_text = @chunk_text,
+      embedding = @embedding,
+      dimensions = @dimensions,
+      model = @model,
+      metadata_json = @metadata_json
+  `).run({
+    embedding_id: record.embedding_id,
+    entity_type: record.entity_type,
+    entity_id: record.entity_id,
+    chunk_text: record.chunk_text,
+    embedding: record.embedding,
+    dimensions: record.dimensions,
+    model: record.model,
+    metadata_json: record.metadata_json || null,
+    created_at: now,
+  });
+}
+
+export function upsertVectorEmbeddingsBatch(records: VectorEmbeddingRecord[]): number {
+  if (!records || records.length === 0) return 0;
+  const db = getDb();
+  const now = new Date().toISOString();
+  const stmt = db.prepare(`
+    INSERT INTO vector_embeddings (
+      embedding_id, entity_type, entity_id, chunk_text,
+      embedding, dimensions, model, metadata_json, created_at
+    ) VALUES (
+      @embedding_id, @entity_type, @entity_id, @chunk_text,
+      @embedding, @dimensions, @model, @metadata_json, @created_at
+    )
+    ON CONFLICT(embedding_id) DO UPDATE SET
+      chunk_text = @chunk_text,
+      embedding = @embedding,
+      dimensions = @dimensions,
+      model = @model,
+      metadata_json = @metadata_json
+  `);
+
+  const runBatch = db.transaction((items: VectorEmbeddingRecord[]) => {
+    let count = 0;
+    for (const r of items) {
+      stmt.run({
+        embedding_id: r.embedding_id,
+        entity_type: r.entity_type,
+        entity_id: r.entity_id,
+        chunk_text: r.chunk_text,
+        embedding: r.embedding,
+        dimensions: r.dimensions,
+        model: r.model,
+        metadata_json: r.metadata_json || null,
+        created_at: r.created_at || now,
+      });
+      count++;
+    }
+    return count;
+  });
+
+  return runBatch(records);
+}
+
+export function getAllVectorEmbeddings(entityType?: string): VectorEmbeddingRecord[] {
+  const db = getDb();
+  if (entityType) {
+    return db.prepare('SELECT * FROM vector_embeddings WHERE entity_type = ?').all(entityType) as VectorEmbeddingRecord[];
+  }
+  return db.prepare('SELECT * FROM vector_embeddings').all() as VectorEmbeddingRecord[];
+}
+
+export function countVectorEmbeddings(entityType?: string): number {
+  const db = getDb();
+  if (entityType) {
+    const row = db.prepare('SELECT COUNT(*) as cnt FROM vector_embeddings WHERE entity_type = ?').get(entityType) as any;
+    return row?.cnt || 0;
+  }
+  const row = db.prepare('SELECT COUNT(*) as cnt FROM vector_embeddings').get() as any;
+  return row?.cnt || 0;
+}
+
 // ─── Query API ───────────────────────────────────────────────
 
 export interface VideosQueryOptions {
@@ -359,13 +707,43 @@ export function getVideoStats(): { total: number; totalSize: number; totalCommen
 
 // ─── Rebuild Index (scan existing files on disk) ─────────────
 
-export function rebuildIndex(): { videosIndexed: number; profilesIndexed: number } {
+export function rebuildIndex(): { videosIndexed: number; profilesIndexed: number; commentsIndexed: number; snapshotsCreated: number } {
   const db = getDb();
   const baseDataDir = config.dataDir;
   let videosIndexed = 0;
   let profilesIndexed = 0;
+  let commentsIndexed = 0;
+  let snapshotsCreated = 0;
 
   console.log('[INDEX] Rebuilding SQLite index from disk...');
+
+  const insertCommentStmt = db.prepare(`
+    INSERT INTO comments (
+      comment_id, video_id, parent_comment_id, author_id,
+      author_username, author_display_name, text, like_count,
+      reply_count, is_reply, published_at, sentiment_label,
+      sentiment_score, created_at
+    ) VALUES (
+      @comment_id, @video_id, @parent_comment_id, @author_id,
+      @author_username, @author_display_name, @text, @like_count,
+      @reply_count, @is_reply, @published_at, @sentiment_label,
+      @sentiment_score, @created_at
+    )
+    ON CONFLICT(comment_id) DO UPDATE SET
+      text = @text,
+      like_count = CASE WHEN @like_count > 0 THEN @like_count ELSE like_count END,
+      reply_count = CASE WHEN @reply_count > 0 THEN @reply_count ELSE reply_count END
+  `);
+
+  const insertSnapshotStmt = db.prepare(`
+    INSERT INTO video_metric_snapshots (
+      video_id, captured_at, views, likes, comments_count,
+      shares, saves, like_rate, comment_rate, share_rate, engagement_rate
+    ) VALUES (
+      @video_id, @captured_at, @views, @likes, @comments_count,
+      @shares, @saves, @like_rate, @comment_rate, @share_rate, @engagement_rate
+    )
+  `);
 
   // Helper: index one video directory
   function indexVideoDir(dirPath: string, videoId: string, profileId?: string): void {
@@ -388,6 +766,45 @@ export function rebuildIndex(): { videosIndexed: number; profilesIndexed: number
       const videoFilePath = path.join(dirPath, 'video.mp4');
       const fileSize = fs.existsSync(videoFilePath) ? fs.statSync(videoFilePath).size : 0;
 
+      const vViews = meta.engagement?.views || 0;
+      const vLikes = meta.engagement?.likes || 0;
+      let vComments = meta.engagement?.comments || 0;
+      const vShares = meta.engagement?.shares || 0;
+      const vSaves = meta.engagement?.saves || 0;
+
+      // Index comments if comments.json exists
+      const commentsPath = path.join(dirPath, 'comments.json');
+      if (fs.existsSync(commentsPath)) {
+        try {
+          const comObj = JSON.parse(fs.readFileSync(commentsPath, 'utf-8'));
+          if (Array.isArray(comObj?.comments)) {
+            if (comObj.comments.length > vComments) {
+              vComments = comObj.comments.length;
+            }
+            const nowIso = new Date().toISOString();
+            for (const c of comObj.comments) {
+              insertCommentStmt.run({
+                comment_id: c.comment_id,
+                video_id: videoId,
+                parent_comment_id: c.parent_comment_id && c.parent_comment_id !== '0' ? c.parent_comment_id : null,
+                author_id: c.author?.id || null,
+                author_username: c.author?.username || null,
+                author_display_name: c.author?.display_name || null,
+                text: c.text || '',
+                like_count: c.like_count || 0,
+                reply_count: c.reply_count || c.reply_comment_total || 0,
+                is_reply: c.is_reply ? 1 : 0,
+                published_at: c.published_at || null,
+                sentiment_label: null,
+                sentiment_score: null,
+                created_at: c.published_at || nowIso,
+              });
+              commentsIndexed++;
+            }
+          }
+        } catch {}
+      }
+
       upsertVideo({
         video_id: videoId,
         profile_id: profileId || null,
@@ -396,11 +813,11 @@ export function rebuildIndex(): { videosIndexed: number; profilesIndexed: number
         avatar_url: meta.author?.avatar_url || '',
         description: meta.content?.description || '',
         published_at: meta.published_at || null,
-        views: meta.engagement?.views || 0,
-        likes: meta.engagement?.likes || 0,
-        comments_count: meta.engagement?.comments || 0,
-        shares: meta.engagement?.shares || 0,
-        saves: meta.engagement?.saves || 0,
+        views: vViews,
+        likes: vLikes,
+        comments_count: vComments,
+        shares: vShares,
+        saves: vSaves,
         duration: tech.duration || meta.media?.duration || 0,
         width: tech.width || meta.media?.width || 0,
         height: tech.height || meta.media?.height || 0,
@@ -413,6 +830,22 @@ export function rebuildIndex(): { videosIndexed: number; profilesIndexed: number
         directory: dirPath,
       });
       videosIndexed++;
+
+      // Create snapshot
+      insertSnapshotStmt.run({
+        video_id: videoId,
+        captured_at: meta.published_at || new Date().toISOString(),
+        views: vViews,
+        likes: vLikes,
+        comments_count: vComments,
+        shares: vShares,
+        saves: vSaves,
+        like_rate: vViews > 0 ? vLikes / vViews : null,
+        comment_rate: vViews > 0 ? vComments / vViews : null,
+        share_rate: vViews > 0 ? vShares / vViews : null,
+        engagement_rate: vViews > 0 ? (vLikes + vComments + vShares) / vViews : null,
+      });
+      snapshotsCreated++;
     } catch (err: any) {
       console.warn(`[INDEX] Failed to index ${dirPath}: ${err.message}`);
     }
@@ -421,7 +854,7 @@ export function rebuildIndex(): { videosIndexed: number; profilesIndexed: number
   // Use a transaction for bulk inserts (massively faster)
   const transaction = db.transaction(() => {
     // Clear old index records so deleted directories don't leave ghost entries
-    db.exec('DELETE FROM videos; DELETE FROM profiles;');
+    db.exec('DELETE FROM videos; DELETE FROM profiles; DELETE FROM comments; DELETE FROM video_metric_snapshots;');
 
     // 1. Single videos: data/videos/<ID>/
     const singleDir = path.join(baseDataDir, 'videos');
@@ -497,8 +930,59 @@ export function rebuildIndex(): { videosIndexed: number; profilesIndexed: number
 
   transaction();
 
-  console.log(`[INDEX] Rebuild complete: ${videosIndexed} videos, ${profilesIndexed} profiles indexed`);
-  return { videosIndexed, profilesIndexed };
+  console.log(`[INDEX] Rebuild complete: ${videosIndexed} videos, ${profilesIndexed} profiles, ${commentsIndexed} comments indexed`);
+  return { videosIndexed, profilesIndexed, commentsIndexed, snapshotsCreated };
+}
+
+export function ingestAllComments(): { commentsIngested: number; videosChecked: number } {
+  const db = getDb();
+  const baseDataDir = config.dataDir;
+  let commentsIngested = 0;
+  let videosChecked = 0;
+
+  console.log('[INDEX] Ingesting all comments from disk...');
+
+  const scanRecursive = (dir: string, depth: number = 0) => {
+    if (!fs.existsSync(dir)) return;
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const entryPath = path.join(dir, entry.name);
+      const commentsPath = path.join(entryPath, 'comments.json');
+      if (fs.existsSync(commentsPath)) {
+        videosChecked++;
+        try {
+          const comObj = JSON.parse(fs.readFileSync(commentsPath, 'utf-8'));
+          if (Array.isArray(comObj?.comments) && comObj.comments.length > 0) {
+            const videoId = entry.name;
+            const records: CommentRecord[] = comObj.comments.map((c: any) => ({
+              comment_id: c.comment_id,
+              video_id: c.video_id || videoId,
+              parent_comment_id: c.parent_comment_id && c.parent_comment_id !== '0' ? c.parent_comment_id : null,
+              author_id: c.author?.id || null,
+              author_username: c.author?.username || null,
+              author_display_name: c.author?.display_name || null,
+              text: c.text || '',
+              like_count: c.like_count || 0,
+              reply_count: c.reply_count || c.reply_comment_total || 0,
+              is_reply: c.is_reply ? 1 : 0,
+              published_at: c.published_at || null,
+            }));
+            const inserted = upsertCommentsBatch(records);
+            commentsIngested += inserted;
+          }
+        } catch {}
+      } else if (depth < 4) {
+        scanRecursive(entryPath, depth + 1);
+      }
+    }
+  };
+
+  scanRecursive(path.join(baseDataDir, 'videos'));
+  scanRecursive(path.join(baseDataDir, 'profiles'));
+
+  console.log(`[INDEX] Ingested ${commentsIngested} comments across ${videosChecked} video folders`);
+  return { commentsIngested, videosChecked };
 }
 
 export function closeDb(): void {
@@ -507,3 +991,4 @@ export function closeDb(): void {
     _db = null;
   }
 }
+

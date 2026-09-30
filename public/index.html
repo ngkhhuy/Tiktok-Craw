@@ -59,8 +59,31 @@
       </div>
     </header>
 
-    <!-- Crawl & Ingestion Section -->
-    <section class="ingest-section">
+    <!-- Main Navigation Tabs -->
+    <nav class="main-tabs-nav" aria-label="Điều hướng chính">
+      <button class="main-tab-btn active" id="btnTabCrawler" data-tab="crawler">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="2" y="2" width="20" height="20" rx="5" ry="5"></rect>
+          <path d="M16 11.37A4 4 0 1 1 12.63 8 4 4 0 0 1 16 11.37z"></path>
+          <line x1="17.5" y1="6.5" x2="17.51" y2="6.5"></line>
+        </svg>
+        <span>Kho Video & Trích Xuất</span>
+      </button>
+      <button class="main-tab-btn" id="btnTabAnalytics" data-tab="analytics">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+          <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+          <line x1="12" y1="22.08" x2="12" y2="12"></line>
+        </svg>
+        <span>AI Analytics Q&A (RAG Assistant)</span>
+        <span class="tab-badge-new">Deterministic</span>
+      </button>
+    </nav>
+
+    <!-- View 1: Crawler & Video Explorer -->
+    <div id="viewCrawler" class="tab-view active">
+      <!-- Crawl & Ingestion Section -->
+      <section class="ingest-section">
       <div class="ingest-card">
         <div class="ingest-header">
           <div class="ingest-title-wrap">
@@ -87,6 +110,21 @@
               spellcheck="false"
             />
             <button id="btnClearIngest" class="btn-clear hidden" aria-label="Xóa nội dung">&times;</button>
+          </div>
+          <div class="concurrency-picker" title="Số luồng cào video song song (Tối ưu theo 16 luồng CPU của bạn)">
+            <label for="concurrencySelect" class="concurrency-lbl">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+              </svg>
+              <span>Luồng:</span>
+            </label>
+            <select id="concurrencySelect" class="concurrency-select">
+              <option value="4">4 luồng</option>
+              <option value="8">8 luồng</option>
+              <option value="16" selected>16 luồng (Khuyên dùng)</option>
+              <option value="24">24 luồng</option>
+              <option value="32">32 luồng</option>
+            </select>
           </div>
           <button id="btnStartIngest" class="btn btn-primary btn-glow">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
@@ -241,9 +279,133 @@
         <p>Thử nhập từ khóa khác hoặc cào thêm video mới bằng CLI.</p>
       </div>
     </main>
+  </div>
 
-    <!-- Detailed Modal / Drawer -->
-    <div class="modal-backdrop hidden" id="modalBackdrop">
+  <!-- View 2: AI Analytics Assistant (RAG Q&A) -->
+  <section class="tab-view hidden" id="viewAnalytics">
+    <div class="analytics-workspace" id="analyticsWorkspace">
+      <!-- Main Chat Column -->
+      <div class="analytics-card" id="analyticsCard">
+        <div class="analytics-header">
+          <div class="analytics-title-wrap">
+            <div class="analytics-ai-badge">
+              <span class="ai-sparkle">✨</span>
+              <span>Deterministic RAG Engine</span>
+            </div>
+            <h2>Trợ Lý Phân Tích Dữ Liệu TikTok</h2>
+            <p>Hỏi đáp số liệu, so sánh video, phân tích tỉ lệ tương tác và bình luận dựa trên Database chuẩn xác 100%, không bịa đặt số liệu.</p>
+          </div>
+          <div class="analytics-actions">
+            <button class="btn btn-secondary btn-sm hidden" id="btnReopenVideoSidebar" title="Mở lại khung phát video">
+              🎬 Xem khung phát video
+            </button>
+            <button class="btn btn-secondary btn-sm" id="btnOpenAiConfig" title="Cài đặt API AI (OpenAI, Gemini, DeepSeek, Groq, Ollama)">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="3"></circle>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+              </svg>
+              Cấu hình AI API
+            </button>
+            <button class="btn btn-secondary btn-sm" id="btnClearChat" title="Xóa đoạn hội thoại và làm mới session">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="3 6 5 6 21 6"></polyline>
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+              </svg>
+              Hội thoại mới
+            </button>
+          </div>
+        </div>
+
+        <!-- Suggested Query Chips -->
+        <div class="suggested-queries">
+          <span class="sugg-label">Gợi ý phân tích:</span>
+          <button class="sugg-chip" data-query="Top 3 video có nhiều lượt xem nhất">🏆 Top 3 video nhiều view nhất</button>
+          <button class="sugg-chip" data-query="List ra 3 video có lượt tim cao nhất">❤️ Top 3 video nhiều like nhất</button>
+          <button class="sugg-chip" data-query="Video dài hơn có nhiều view hơn không? Phân tích tương quan">🔬 Thời lượng có ảnh hưởng view?</button>
+          <button class="sugg-chip" data-query="Tổng số view và like của toàn bộ dữ liệu cào được?">📊 Tổng quan toàn bộ Dataset</button>
+          <button class="sugg-chip" data-query="Hiệu suất kênh @mvpcapcut_912 so với mức median chung?">👤 Đánh giá kênh @mvpcapcut_912</button>
+        </div>
+
+        <!-- Chat Messages Window -->
+        <div class="chat-messages-container" id="chatMessages">
+          <div class="chat-message assistant welcome-message">
+            <div class="msg-avatar">🤖</div>
+            <div class="msg-body">
+              <div class="msg-header">
+                <span class="msg-sender">TikTok Analytics AI</span>
+                <span class="msg-time">Hệ thống</span>
+              </div>
+              <div class="msg-content">
+                <p>Xin chào! Tôi là trợ lý phân tích dữ liệu TikTok cục bộ. Tôi kết nối trực tiếp với <strong>SQLite Database</strong> của bạn để tính toán số liệu chính xác 100%.</p>
+                <p>Bạn có thể hỏi tôi:</p>
+                <ul>
+                  <li><strong>Số liệu video:</strong> Nhập URL video TikTok hoặc ID để xem view, like, comment, engagement rate.</li>
+                  <li><strong>Bảng xếp hạng & Danh sách:</strong> <em>"List ra 3 video có lượt tim cao nhất"</em> (sẽ tự động mở khung phát video TikTok bên phải!).</li>
+                  <li><strong>So sánh:</strong> So sánh 2 video bất kỳ hoặc so sánh một kênh với mức median của toàn bộ dữ liệu.</li>
+                  <li><strong>Phân tích bình luận:</strong> Tìm kiếm ngữ nghĩa và cảm xúc bình luận của người xem.</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Chat Input Form -->
+        <div class="chat-input-bar">
+          <div class="chat-input-wrapper">
+            <textarea 
+              id="chatInput" 
+              rows="1" 
+              placeholder="Nhập câu hỏi phân tích (ví dụ: 'List ra 3 video có lượt tim cao nhất', 'Top 3 video nhiều view nhất')..."
+              autocomplete="off"
+            ></textarea>
+            <button id="btnSendChat" class="btn btn-primary btn-send" title="Gửi câu hỏi (Enter)">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="22" y1="2" x2="11" y2="13"></line>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+              </svg>
+            </button>
+          </div>
+          <div class="chat-input-footer">
+            <span class="chat-footnote">💡 Nhấn <kbd>Enter</kbd> để gửi, <kbd>Shift + Enter</kbd> để xuống dòng. Dữ liệu trích xuất xác thực từ SQLite.</span>
+            <span class="chat-model-indicator" id="chatModelIndicator">⚡ Deterministic Engine</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Column: Interactive Video Embed Deck -->
+      <aside class="ai-video-sidebar hidden" id="aiVideoSidebar">
+        <div class="ai-sidebar-header">
+          <div class="ai-sidebar-title-group">
+            <span class="ai-sidebar-icon">🎬</span>
+            <div class="ai-sidebar-title-wrap">
+              <h3 id="aiSidebarTitle">Video Được Đề Cập</h3>
+              <span class="ai-sidebar-badge" id="aiSidebarBadge">3 video sẵn sàng phát</span>
+            </div>
+          </div>
+          <div class="ai-sidebar-actions">
+            <button class="btn btn-secondary btn-xs" id="btnToggleAllLocal" title="Đổi tất cả sang bản phát Local MP4">
+              <span>💾 Local</span>
+            </button>
+            <button class="btn btn-secondary btn-xs active" id="btnToggleAllEmbed" title="Đổi tất cả sang TikTok Embed Plugin">
+              <span>▶️ TikTok</span>
+            </button>
+            <button class="btn-icon-close" id="btnCloseVideoSidebar" title="Đóng khung phát">&times;</button>
+          </div>
+        </div>
+
+        <div class="ai-sidebar-subbar">
+          <span class="ai-subbar-hint">✨ Nhúng plugin TikTok Player chính thức. Bấm phát để xem ngay.</span>
+        </div>
+
+        <div class="ai-video-list" id="aiVideoList">
+          <!-- Rendered dynamically with TikTok Embeds -->
+        </div>
+      </aside>
+    </div>
+  </section>
+
+  <!-- Detailed Modal / Drawer -->
+  <div class="modal-backdrop hidden" id="modalBackdrop">
       <div class="modal-card" id="modalCard">
         <button class="modal-close" id="modalClose" aria-label="Đóng">&times;</button>
 
@@ -416,6 +578,61 @@
             </div>
           </div>
         </div>
+      </div>
+    <!-- AI Config Modal -->
+    <div class="modal-backdrop hidden" id="aiConfigModalBackdrop">
+      <div class="modal-card ai-config-card" id="aiConfigModalCard">
+        <button class="modal-close" id="aiConfigModalClose" aria-label="Đóng">&times;</button>
+        
+        <div class="ai-config-header">
+          <div class="ai-config-badge">⚙️ External AI Settings</div>
+          <h2>Cấu Hình AI Bên Ngoài & Embeddings</h2>
+          <p>Hệ thống tự động dùng <strong>Deterministic Offline Engine</strong> (Miễn phí, 15ms). Bạn có thể kết nối thêm OpenAI, Gemini, DeepSeek, Groq hoặc Ollama để có lời giải thích tự nhiên hơn.</p>
+        </div>
+
+        <form id="aiConfigForm" class="ai-config-form">
+          <!-- Preset Provider Selector -->
+          <div class="form-group">
+            <label class="form-lbl">Chọn Nhà Cung Cấp Mẫu (Preset):</label>
+            <div class="preset-chips">
+              <button type="button" class="preset-chip active" data-provider="offline">⚡ Offline Engine (Mặc định)</button>
+              <button type="button" class="preset-chip" data-provider="openai">OpenAI (ChatGPT)</button>
+              <button type="button" class="preset-chip" data-provider="gemini">Google Gemini</button>
+              <button type="button" class="preset-chip" data-provider="deepseek">DeepSeek</button>
+              <button type="button" class="preset-chip" data-provider="groq">Groq (Siêu nhanh)</button>
+              <button type="button" class="preset-chip" data-provider="ollama">Ollama (Local)</button>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label for="cfgLlmBaseUrl" class="form-lbl">LLM Base URL:</label>
+              <input type="text" id="cfgLlmBaseUrl" class="form-input" placeholder="https://api.openai.com/v1" />
+            </div>
+            <div class="form-group flex-1">
+              <label for="cfgLlmModel" class="form-lbl">LLM Model Name:</label>
+              <input type="text" id="cfgLlmModel" class="form-input" placeholder="gpt-4o-mini" />
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="cfgLlmApiKey" class="form-lbl">LLM API Key:</label>
+            <input type="password" id="cfgLlmApiKey" class="form-input" placeholder="sk-... (để trống nếu dùng Offline Engine hoặc Ollama)" autocomplete="off" />
+            <small class="form-hint">Key được lưu an toàn vào tệp <code>.env</code> và áp dụng ngay lập tức.</small>
+          </div>
+
+          <div class="form-divider"></div>
+
+          <div class="form-group">
+            <label for="cfgEmbeddingModel" class="form-lbl">Embedding Model (Tùy chọn):</label>
+            <input type="text" id="cfgEmbeddingModel" class="form-input" placeholder="text-embedding-3-small (hoặc để trống dùng local vector)" />
+          </div>
+
+          <div class="form-actions">
+            <button type="button" class="btn btn-secondary" id="btnCancelAiConfig">Hủy</button>
+            <button type="submit" class="btn btn-primary" id="btnSaveAiConfig">Lưu Cấu Hình</button>
+          </div>
+        </form>
       </div>
     </div>
 

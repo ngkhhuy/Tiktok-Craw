@@ -1,6 +1,7 @@
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 import { tiktokAcquisition } from '../acquisition/tiktok/index.js';
@@ -8,6 +9,9 @@ import { profileCrawler } from '../crawler/profile-crawler.js';
 import { videoCrawler } from '../crawler/video-crawler.js';
 import { localStorage } from '../storage/local-storage.js';
 import { queryVideos, getVideoById, getVideoStats, rebuildIndex } from '../storage/database.js';
+import { ragService } from '../rag/rag-service.js';
+import { conversationManager } from '../conversation/conversation-manager.js';
+import { getPopulationBaseline } from '../analytics/baseline.js';
 
 export interface CrawlJob {
   id: string;
@@ -290,12 +294,25 @@ export function createServer(port: number = 3000) {
       return;
     }
 
+    // 0.05 API: /api/system-info (Hardware specs and concurrency defaults)
+    if (req.method === 'GET' && pathname === '/api/system-info') {
+      const cpus = os.cpus();
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        cpuModel: cpus[0]?.model || 'Generic CPU',
+        cpuCores: cpus.length || 16,
+        defaultConcurrency: config.videoConcurrency,
+      }));
+      return;
+    }
+
     // 0.1 API: /api/crawl (Start background crawl)
     if (req.method === 'POST' && pathname === '/api/crawl') {
       try {
         const body = await parseRequestBody(req);
         const input = String(body.input || '').trim();
         const limit = Number(body.limit || 0) || undefined;
+        const concurrency = Number(body.concurrency || 0) || config.videoConcurrency;
 
         if (!input) {
           res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -344,6 +361,7 @@ export function createServer(port: number = 3000) {
 
               await profileCrawler.crawl(pUrl, {
                 limit: limit || 1000,
+                concurrency,
                 signal: abortController.signal,
                 onProgress: (evt) => {
                   if (job.status === 'stopped') return;
@@ -505,6 +523,134 @@ export function createServer(port: number = 3000) {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(stats));
       return;
+    }
+
+    // 1.3 API: /api/rag/query
+    if (req.method === 'POST' && pathname === '/api/rag/query') {
+      try {
+        const body = await parseRequestBody(req);
+        const question = String(body.question || '').trim();
+        const sessionId = body.sessionId ? String(body.sessionId).trim() : undefined;
+
+        if (!question) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'Câu hỏi không được để trống' }));
+          return;
+        }
+
+        const result = await ragService.query(question, sessionId);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify(result));
+      } catch (err: any) {
+        logger.error(`[RAG] Error processing query: ${err.message}`);
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
+    // 1.4 API: /api/rag/sessions/:id
+    if (pathname.startsWith('/api/rag/sessions/')) {
+      const sessId = pathname.slice('/api/rag/sessions/'.length).split('/')[0];
+      if (req.method === 'DELETE') {
+        conversationManager.clearSession(sessId);
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ success: true, message: 'Session cleared' }));
+        return;
+      }
+      const session = conversationManager.getOrCreateSession(sessId);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(session));
+      return;
+    }
+
+    // 1.5 API: /api/analytics/baseline
+    if (pathname === '/api/analytics/baseline') {
+      const population = (parsedUrl.searchParams.get('population') || 'all_videos') as any;
+      const baseline = getPopulationBaseline(population);
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(baseline));
+      return;
+    }
+
+    // 1.6 API: /api/rag/config (Get/Set AI API configurations)
+    if (pathname === '/api/rag/config') {
+      if (req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({
+          llmApiKeyMasked: config.llmApiKey ? config.llmApiKey.slice(0, 4) + '...' + config.llmApiKey.slice(-4) : '',
+          hasLlmApiKey: Boolean(config.llmApiKey),
+          llmBaseUrl: config.llmBaseUrl,
+          llmModel: config.llmModel,
+          embeddingApiKeyMasked: config.embeddingApiKey ? config.embeddingApiKey.slice(0, 4) + '...' + config.embeddingApiKey.slice(-4) : '',
+          hasEmbeddingApiKey: Boolean(config.embeddingApiKey),
+          embeddingBaseUrl: config.embeddingBaseUrl,
+          embeddingModel: config.embeddingModel,
+          ragDebug: config.ragDebug,
+        }));
+        return;
+      }
+      if (req.method === 'POST') {
+        try {
+          const body = await parseRequestBody(req);
+          const envUpdates: Record<string, string> = {};
+
+          if (body.llmApiKey !== undefined) {
+            config.llmApiKey = String(body.llmApiKey).trim();
+            envUpdates['LLM_API_KEY'] = config.llmApiKey;
+          }
+          if (body.llmBaseUrl !== undefined) {
+            config.llmBaseUrl = String(body.llmBaseUrl).trim();
+            envUpdates['LLM_BASE_URL'] = config.llmBaseUrl;
+          }
+          if (body.llmModel !== undefined) {
+            config.llmModel = String(body.llmModel).trim();
+            envUpdates['LLM_MODEL'] = config.llmModel;
+          }
+          if (body.embeddingApiKey !== undefined) {
+            config.embeddingApiKey = String(body.embeddingApiKey).trim();
+            envUpdates['EMBEDDING_API_KEY'] = config.embeddingApiKey;
+          }
+          if (body.embeddingBaseUrl !== undefined) {
+            config.embeddingBaseUrl = String(body.embeddingBaseUrl).trim();
+            envUpdates['EMBEDDING_BASE_URL'] = config.embeddingBaseUrl;
+          }
+          if (body.embeddingModel !== undefined) {
+            config.embeddingModel = String(body.embeddingModel).trim();
+            envUpdates['EMBEDDING_MODEL'] = config.embeddingModel;
+          }
+
+          // Persist to .env
+          const envPath = path.resolve(process.cwd(), '.env');
+          if (fs.existsSync(envPath)) {
+            let envContent = fs.readFileSync(envPath, 'utf-8');
+            for (const [k, v] of Object.entries(envUpdates)) {
+              const regex = new RegExp(`^${k}=.*$`, 'm');
+              if (regex.test(envContent)) {
+                envContent = envContent.replace(regex, `${k}=${v}`);
+              } else {
+                envContent += `\n${k}=${v}`;
+              }
+            }
+            fs.writeFileSync(envPath, envContent, 'utf-8');
+          }
+
+          res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({
+            success: true,
+            message: 'Cấu hình AI đã được lưu thành công vào .env và áp dụng ngay lập tức!',
+            current: {
+              llmModel: config.llmModel,
+              llmBaseUrl: config.llmBaseUrl,
+              hasLlmApiKey: Boolean(config.llmApiKey),
+            }
+          }));
+        } catch (err: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+        return;
+      }
     }
 
     // 2. API: /api/videos/:id

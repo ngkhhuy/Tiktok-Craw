@@ -101,10 +101,36 @@ export class LocalStorage implements Storage {
     const dir = path.dirname(full);
     await this.ensureDir(dir);
 
-    // Atomic write via temp file
-    const tmp = `${full}.tmp.${Date.now()}`;
+    // Atomic write via unique temp file to prevent concurrent collisions
+    const tmp = `${full}.tmp.${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     await fs.promises.writeFile(tmp, data);
-    await fs.promises.rename(tmp, full);
+
+    // Windows NTFS can lock files momentarily (AV, search indexer, concurrent readers).
+    // Retry rename with exponential backoff, falling back to copy+unlink if needed.
+    let success = false;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        await fs.promises.rename(tmp, full);
+        success = true;
+        break;
+      } catch (err: any) {
+        if ((err.code === 'EPERM' || err.code === 'EBUSY' || err.code === 'EACCES') && attempt < 4) {
+          await new Promise((r) => setTimeout(r, 40 * (attempt + 1)));
+        } else if (attempt === 4) {
+          try {
+            await fs.promises.copyFile(tmp, full);
+            await fs.promises.unlink(tmp).catch(() => {});
+            success = true;
+            break;
+          } catch {}
+          try { await fs.promises.unlink(tmp).catch(() => {}); } catch {}
+          throw err;
+        } else {
+          try { await fs.promises.unlink(tmp).catch(() => {}); } catch {}
+          throw err;
+        }
+      }
+    }
   }
 
   async writeJson(targetPath: string, data: any): Promise<void> {
