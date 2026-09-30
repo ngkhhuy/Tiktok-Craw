@@ -15,7 +15,15 @@ import { config } from '../config/index.js';
 import { VideoManifest } from '../storage/types.js';
 import { NormalizedTikTokVideo } from '../acquisition/tiktok/types.js';
 import { mediaResolver } from '../acquisition/tiktok/media-resolver.js';
-import { upsertVideo } from '../storage/database.js';
+import { insertMetricSnapshot, upsertVideo } from '../storage/database.js';
+import { ConcurrencyLimiter } from '../utils/concurrency.js';
+
+// A profile crawl may schedule many video tasks, but each TikTok-facing
+// operation uses its own bounded pool. This prevents 16 video tasks from
+// becoming 48 simultaneous CDN/API requests.
+const metadataLimiter = new ConcurrencyLimiter(config.metadataConcurrency);
+const mediaLimiter = new ConcurrencyLimiter(config.mediaConcurrency);
+const commentsLimiter = new ConcurrencyLimiter(config.commentConcurrency);
 
 export interface VideoCrawlerOptions {
   profileId?: string;
@@ -23,6 +31,8 @@ export interface VideoCrawlerOptions {
   refreshComments?: boolean;
   force?: boolean;
   metadata?: NormalizedTikTokVideo;
+  /** Complete a bulk profile crawl after media is ready; comments continue in the bounded background queue. */
+  deferComments?: boolean;
 }
 
 export interface VideoCrawlResult {
@@ -118,6 +128,7 @@ export class VideoCrawler {
     try {
       // 3. Acquire Metadata (if needed)
       let metadata: any = null;
+      let metadataCapturedAt: string | null = null;
       const needMetadata = options.force || options.refresh || !fs.existsSync(metadataFile);
 
       if (needMetadata) {
@@ -125,11 +136,12 @@ export class VideoCrawler {
         if (options.metadata) {
           metadata = options.metadata;
         } else {
-          metadata = await tiktokAcquisition.getVideo(targetUrl);
+          metadata = await metadataLimiter.run(() => tiktokAcquisition.getVideo(targetUrl));
         }
         await localStorage.writeJson(metadataFile, metadata);
+        metadataCapturedAt = new Date().toISOString();
         manifest.stages.metadata.status = 'completed';
-        manifest.stages.metadata.completed_at = new Date().toISOString();
+        manifest.stages.metadata.completed_at = metadataCapturedAt;
         manifest.files.metadata = 'metadata.json';
         logger.videoProgress(videoId, 'metadata', 'success');
       } else {
@@ -140,7 +152,7 @@ export class VideoCrawler {
       // Handle only comment refresh mode
       if (options.refreshComments && !options.force) {
         manifest.stages.comments.started_at = new Date().toISOString();
-        const commentsResult = await tiktokAcquisition.getComments(videoId, targetUrl);
+        const commentsResult = await commentsLimiter.run(() => tiktokAcquisition.getComments(videoId, targetUrl));
         await localStorage.writeJson(commentsFile, commentsResult);
         manifest.stages.comments.status = commentsResult.status;
         manifest.stages.comments.completed_at = new Date().toISOString();
@@ -214,7 +226,9 @@ export class VideoCrawler {
             const downloadedImages: string[] = [];
             for (let i = 0; i < photoImages.length; i++) {
               const imgPath = path.join(imagesDir, `img_${i}.jpg`);
-              await mediaDownloader.downloadThumbnail(photoImages[i], imgPath, { referer: targetUrl });
+              await mediaLimiter.run(() =>
+                mediaDownloader.downloadThumbnail(photoImages[i], imgPath, { referer: targetUrl })
+              );
               if (fs.existsSync(imgPath) && fs.statSync(imgPath).size > 0) {
                 downloadedImages.push(imgPath);
               }
@@ -253,10 +267,12 @@ export class VideoCrawler {
             logger.videoProgress(videoId, 'sha256', 'success', sha256Val.slice(0, 12) + '...');
           } else {
             // Regular MP4 Video Download
-            const downloadRes = await mediaDownloader.downloadVideo(mediaUrl!, videoFile, {
-              cookies: metadata?.cookies,
-              referer: targetUrl,
-            });
+            const downloadRes = await mediaLimiter.run(() =>
+              mediaDownloader.downloadVideo(mediaUrl!, videoFile, {
+                cookies: metadata?.cookies,
+                referer: targetUrl,
+              })
+            );
 
             sha256Val = downloadRes.sha256;
             manifest.stages.video.status = 'completed';
@@ -300,9 +316,11 @@ export class VideoCrawler {
         const thumbUrl = metadata?.media?.thumbnail_url || (metadata?.media?.images && metadata.media.images[0]);
         if (needThumb && thumbUrl) {
           manifest.stages.thumbnail.started_at = new Date().toISOString();
-          const thumbOk = await mediaDownloader.downloadThumbnail(thumbUrl, thumbnailFile, {
-            referer: targetUrl,
-          });
+          const thumbOk = await mediaLimiter.run(() =>
+            mediaDownloader.downloadThumbnail(thumbUrl, thumbnailFile, {
+              referer: targetUrl,
+            })
+          );
 
           if (thumbOk) {
             manifest.stages.thumbnail.status = 'completed';
@@ -326,7 +344,7 @@ export class VideoCrawler {
         const needComments = options.force || !fs.existsSync(commentsFile);
         if (needComments) {
           manifest.stages.comments.started_at = new Date().toISOString();
-          const commentsResult = await tiktokAcquisition.getComments(videoId, targetUrl);
+          const commentsResult = await commentsLimiter.run(() => tiktokAcquisition.getComments(videoId, targetUrl));
           await localStorage.writeJson(commentsFile, commentsResult);
           manifest.stages.comments.status = commentsResult.status;
           manifest.stages.comments.completed_at = new Date().toISOString();
@@ -343,8 +361,15 @@ export class VideoCrawler {
         }
       };
 
-      // Run Video Pipeline, Thumbnail Download, and Comments Fetch simultaneously
-      await Promise.all([videoPipeline(), thumbPipeline(), commentsPipeline()]);
+      // A profile crawl should report completed media as soon as it is usable.
+      // Comments remain bounded in their own background queue so pagination
+      // cannot serialize all video completions. A direct single-video crawl
+      // keeps the original behavior and waits for comments.
+      if (options.deferComments) {
+        await Promise.all([videoPipeline(), thumbPipeline()]);
+      } else {
+        await Promise.all([videoPipeline(), thumbPipeline(), commentsPipeline()]);
+      }
 
       // 8. Finalize Manifest & Index to Database
       manifest.status = 'completed';
@@ -390,8 +415,40 @@ export class VideoCrawler {
           is_photo_mode: Boolean(metadata?.media?.is_photo_mode),
           directory: videoDir,
         });
+
+        // Add a time-series point only when fresh metadata was observed from
+        // TikTok. Resuming a file download must not look like a new metric
+        // observation.
+        if (metadataCapturedAt) {
+          insertMetricSnapshot({
+            video_id: videoId,
+            captured_at: metadataCapturedAt,
+            views: metadata?.engagement?.views || 0,
+            likes: metadata?.engagement?.likes || 0,
+            comments_count: metadata?.engagement?.comments || 0,
+            shares: metadata?.engagement?.shares || 0,
+            saves: metadata?.engagement?.saves || 0,
+          });
+        }
       } catch (dbErr: any) {
         logger.warn(`Failed to index video ${videoId} into database: ${dbErr.message}`);
+      }
+
+      if (options.deferComments && (options.force || !fs.existsSync(commentsFile))) {
+        logger.videoProgress(videoId, 'comments', 'started', 'background queue');
+        void commentsPipeline()
+          .catch((commentsErr: any) => {
+            manifest.stages.comments.status = 'failed';
+            manifest.stages.comments.completed_at = new Date().toISOString();
+            logger.warn(`Background comments fetch failed for ${videoId}: ${commentsErr.message}`);
+          })
+          .finally(async () => {
+            try {
+              await saveVideoManifest(videoDir, manifest);
+            } catch (saveErr: any) {
+              logger.warn(`Could not save background comment status for ${videoId}: ${saveErr.message}`);
+            }
+          });
       }
 
       console.log(`[RESULT] completed ${videoId}\n`);

@@ -163,6 +163,7 @@ export class ProfileCrawler {
             refreshComments: options.refreshComments,
             force: options.force,
             metadata: vidRef.normalized,
+            deferComments: !options.refreshComments,
           });
 
           if (result.status === 'completed') {

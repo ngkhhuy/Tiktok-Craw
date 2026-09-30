@@ -1,6 +1,6 @@
 import { config } from '../../../config/index.js';
 import { logger } from '../../../utils/logger.js';
-import { httpClient } from './client.js';
+import { commentsHttpClient } from './client.js';
 import {
   NormalizedTikTokComment,
   CommentFetchResult,
@@ -64,7 +64,7 @@ export async function fetchCommentsHttp(
       page++;
 
       const apiUrl = `https://www.tiktok.com/api/comment/list/?aid=1988&aweme_id=${videoId}&count=20&cursor=${cursor}`;
-      const res = await httpClient.get(apiUrl, {
+      const res = await commentsHttpClient.get(apiUrl, {
         headers: {
           'Referer': videoUrl,
           'Accept': 'application/json, text/plain, */*',
@@ -142,7 +142,7 @@ export async function fetchCommentRepliesHttp(
   videoUrl: string
 ): Promise<NormalizedTikTokComment[]> {
   const replyUrl = `https://www.tiktok.com/api/comment/list/reply/?aid=1988&item_id=${videoId}&comment_id=${commentId}&count=20&cursor=0`;
-  const res = await httpClient.get(replyUrl, {
+  const res = await commentsHttpClient.get(replyUrl, {
     headers: {
       'Referer': videoUrl,
       'Accept': 'application/json, text/plain, */*',

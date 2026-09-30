@@ -739,10 +739,34 @@ export function rebuildIndex(): { videosIndexed: number; profilesIndexed: number
     INSERT INTO video_metric_snapshots (
       video_id, captured_at, views, likes, comments_count,
       shares, saves, like_rate, comment_rate, share_rate, engagement_rate
-    ) VALUES (
+    SELECT
       @video_id, @captured_at, @views, @likes, @comments_count,
       @shares, @saves, @like_rate, @comment_rate, @share_rate, @engagement_rate
+    WHERE NOT EXISTS (
+      SELECT 1 FROM video_metric_snapshots
+      WHERE video_id = @video_id AND captured_at = @captured_at
     )
+  `);
+
+  const migrateLegacySnapshotTimeStmt = db.prepare(`
+    UPDATE video_metric_snapshots
+    SET captured_at = @captured_at
+    WHERE video_id = @video_id
+      AND captured_at = @legacy_captured_at
+      AND NOT EXISTS (
+        SELECT 1 FROM video_metric_snapshots
+        WHERE video_id = @video_id AND captured_at = @captured_at
+      )
+  `);
+
+  const deleteDuplicateLegacySnapshotStmt = db.prepare(`
+    DELETE FROM video_metric_snapshots
+    WHERE video_id = @video_id
+      AND captured_at = @legacy_captured_at
+      AND EXISTS (
+        SELECT 1 FROM video_metric_snapshots
+        WHERE video_id = @video_id AND captured_at = @captured_at
+      )
   `);
 
   // Helper: index one video directory
@@ -762,6 +786,14 @@ export function rebuildIndex(): { videosIndexed: number; profilesIndexed: number
       if (fs.existsSync(manifestPath)) {
         try { manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')); } catch {}
       }
+
+      // A metric snapshot represents when TikTok was observed, not when the
+      // video was published. The metadata-stage timestamp is the most precise
+      // crawl observation; older artifacts fall back to manifest completion or
+      // the metadata file's modification time.
+      const metadataCapturedAt = manifest?.stages?.metadata?.completed_at
+        || manifest?.completed_at
+        || fs.statSync(metaPath).mtime.toISOString();
 
       const videoFilePath = path.join(dirPath, 'video.mp4');
       const fileSize = fs.existsSync(videoFilePath) ? fs.statSync(videoFilePath).size : 0;
@@ -831,10 +863,26 @@ export function rebuildIndex(): { videosIndexed: number; profilesIndexed: number
       });
       videosIndexed++;
 
-      // Create snapshot
-      insertSnapshotStmt.run({
+      // Migrate snapshots created by older versions that incorrectly used the
+      // TikTok publication time as the observation time.
+      if (meta.published_at && metadataCapturedAt !== meta.published_at) {
+        deleteDuplicateLegacySnapshotStmt.run({
+          video_id: videoId,
+          captured_at: metadataCapturedAt,
+          legacy_captured_at: meta.published_at,
+        });
+        migrateLegacySnapshotTimeStmt.run({
+          video_id: videoId,
+          captured_at: metadataCapturedAt,
+          legacy_captured_at: meta.published_at,
+        });
+      }
+
+      // Preserve all historic observations during rebuild. Add one only when
+      // this artifact has never contributed its original crawl-time snapshot.
+      const snapshotResult = insertSnapshotStmt.run({
         video_id: videoId,
-        captured_at: meta.published_at || new Date().toISOString(),
+        captured_at: metadataCapturedAt,
         views: vViews,
         likes: vLikes,
         comments_count: vComments,
@@ -845,7 +893,7 @@ export function rebuildIndex(): { videosIndexed: number; profilesIndexed: number
         share_rate: vViews > 0 ? vShares / vViews : null,
         engagement_rate: vViews > 0 ? (vLikes + vComments + vShares) / vViews : null,
       });
-      snapshotsCreated++;
+      snapshotsCreated += snapshotResult.changes;
     } catch (err: any) {
       console.warn(`[INDEX] Failed to index ${dirPath}: ${err.message}`);
     }
@@ -854,7 +902,9 @@ export function rebuildIndex(): { videosIndexed: number; profilesIndexed: number
   // Use a transaction for bulk inserts (massively faster)
   const transaction = db.transaction(() => {
     // Clear old index records so deleted directories don't leave ghost entries
-    db.exec('DELETE FROM videos; DELETE FROM profiles; DELETE FROM comments; DELETE FROM video_metric_snapshots;');
+    // Snapshots are a time series and must survive an index rebuild. Videos,
+    // profiles and comments are reconstructed from their current artifacts.
+    db.exec('DELETE FROM videos; DELETE FROM profiles; DELETE FROM comments;');
 
     // 1. Single videos: data/videos/<ID>/
     const singleDir = path.join(baseDataDir, 'videos');
@@ -991,4 +1041,3 @@ export function closeDb(): void {
     _db = null;
   }
 }
-

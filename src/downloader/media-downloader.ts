@@ -5,6 +5,7 @@ import { calculateFileSha256 } from './hash.js';
 import { config } from '../config/index.js';
 import { logger } from '../utils/logger.js';
 import { withRetry } from '../utils/retry.js';
+import { RateLimiter } from '../utils/rate-limiter.js';
 
 export interface DownloadResult {
   outputPath: string;
@@ -35,6 +36,64 @@ async function safeRename(source: string, destination: string): Promise<void> {
 }
 
 export class MediaDownloader {
+  private readonly rateLimiter = new RateLimiter(config.mediaRequestDelayMs);
+
+  /**
+   * Streams a response while enforcing a timeout only when data stops moving.
+   * A total-request timeout is a poor fit for large videos: it kills healthy
+   * slow downloads, while a stalled socket can otherwise hold a worker slot
+   * for several retries.
+   */
+  private async fetchToFile(
+    url: string,
+    outputPath: string,
+    headers: Record<string, string>,
+    label: string
+  ): Promise<void> {
+    await this.rateLimiter.acquire();
+
+    const controller = new AbortController();
+    let source: Readable | undefined;
+    let destination: fs.WriteStream | undefined;
+    let stallTimer: NodeJS.Timeout | undefined;
+    let stalled = false;
+
+    const armStallTimer = () => {
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => {
+        stalled = true;
+        const error = new Error(`${label} made no progress for ${config.mediaStallTimeoutMs}ms`);
+        controller.abort(error);
+        source?.destroy(error);
+        destination?.destroy(error);
+      }, config.mediaStallTimeoutMs);
+    };
+
+    try {
+      armStallTimer();
+      const res = await fetch(url, { headers, signal: controller.signal });
+
+      if (!res.ok && res.status !== 206) {
+        throw new Error(`${label} HTTP error: status ${res.status} ${res.statusText}`);
+      }
+      if (!res.body) {
+        throw new Error(`${label} response body is empty`);
+      }
+
+      source = Readable.fromWeb(res.body as any);
+      destination = fs.createWriteStream(outputPath);
+      source.on('data', armStallTimer);
+      await pipeline(source, destination);
+    } catch (err: any) {
+      if (stalled) {
+        throw new Error(`${label} stalled after ${config.mediaStallTimeoutMs}ms without data`);
+      }
+      throw err;
+    } finally {
+      if (stallTimer) clearTimeout(stallTimer);
+    }
+  }
+
   async downloadVideo(
     mediaUrl: string,
     outputPath: string,
@@ -71,20 +130,10 @@ export class MediaDownloader {
 
       await withRetry(
         async () => {
-          const res = await fetch(mediaUrl, { headers });
-
-          if (!res.ok && res.status !== 206) {
-            throw new Error(`Media download HTTP error: status ${res.status} ${res.statusText}`);
-          }
-
-          if (!res.body) {
-            throw new Error('Response body is empty');
-          }
-
-          const fileStream = fs.createWriteStream(partPath);
-          const nodeReadable = Readable.fromWeb(res.body as any);
-
-          await pipeline(nodeReadable, fileStream);
+          // Every retry starts from a clean partial file. Resume is deliberately
+          // not attempted here because the current TikTok CDN URLs are ephemeral.
+          await fs.promises.rm(partPath, { force: true }).catch(() => {});
+          await this.fetchToFile(mediaUrl, partPath, headers, 'Media download');
         },
         {
           maxRetries: config.maxRetries,
@@ -141,23 +190,17 @@ export class MediaDownloader {
     }
 
     try {
-      const res = await fetch(thumbnailUrl, {
-        headers: {
+      await fs.promises.rm(partPath, { force: true }).catch(() => {});
+      await this.fetchToFile(
+        thumbnailUrl,
+        partPath,
+        {
           'User-Agent': config.userAgentDesktop,
           'Referer': options.referer || 'https://www.tiktok.com/',
           'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
         },
-      });
-
-      if (!res.ok) {
-        logger.warn(`Thumbnail download returned HTTP ${res.status}`);
-        return false;
-      }
-
-      const fileStream = fs.createWriteStream(partPath);
-      const nodeReadable = Readable.fromWeb(res.body as any);
-
-      await pipeline(nodeReadable, fileStream);
+        'Thumbnail download'
+      );
 
       const stats = fs.statSync(partPath);
       if (stats.size === 0) {
