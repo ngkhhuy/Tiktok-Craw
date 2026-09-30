@@ -1,0 +1,363 @@
+import path from 'path';
+import fs from 'fs';
+import { tiktokAcquisition } from '../acquisition/tiktok/index.js';
+import { mediaDownloader } from '../downloader/media-downloader.js';
+import { runFfprobe } from '../media/ffprobe.js';
+import { localStorage } from '../storage/local-storage.js';
+import {
+  isVideoCompleted,
+  createInitialVideoManifest,
+  saveVideoManifest,
+  loadVideoManifest,
+} from '../storage/manifest.js';
+import { logger } from '../utils/logger.js';
+import { config } from '../config/index.js';
+import { VideoManifest } from '../storage/types.js';
+import { NormalizedTikTokVideo } from '../acquisition/tiktok/types.js';
+
+export interface VideoCrawlerOptions {
+  profileId?: string;
+  refresh?: boolean;
+  refreshComments?: boolean;
+  force?: boolean;
+  metadata?: NormalizedTikTokVideo;
+}
+
+export interface VideoCrawlResult {
+  videoId: string;
+  status: 'completed' | 'skipped' | 'failed';
+  videoDir: string;
+  error?: string;
+  manifest?: VideoManifest;
+}
+
+export class VideoCrawler {
+  async crawl(inputUrl: string, options: VideoCrawlerOptions = {}): Promise<VideoCrawlResult> {
+    logger.stage('video', `Starting video processing: ${inputUrl}`);
+
+    // 1. Resolve & Canonicalize URL
+    const parsed = await tiktokAcquisition.parseAndResolveUrl(inputUrl);
+
+    if (parsed.type !== 'video' || !parsed.videoId) {
+      throw new Error(`Invalid TikTok video URL: ${inputUrl}`);
+    }
+
+    const videoId = parsed.videoId;
+    const targetUrl = parsed.canonicalUrl || parsed.rawUrl;
+    const videoDir = localStorage.getVideoDir(videoId, options.profileId);
+    await localStorage.ensureDir(videoDir);
+
+    const videoFile = path.join(videoDir, 'video.mp4');
+    const thumbnailFile = path.join(videoDir, 'thumbnail.jpg');
+    const metadataFile = path.join(videoDir, 'metadata.json');
+    const technicalFile = path.join(videoDir, 'technical.json');
+    const commentsFile = path.join(videoDir, 'comments.json');
+    const manifestFile = path.join(videoDir, 'manifest.json');
+
+    // 2. Check Idempotency / Resume
+    const alreadyCompleted = isVideoCompleted(videoDir);
+
+    if (alreadyCompleted && !options.force && !options.refresh && !options.refreshComments) {
+      logger.stage('video', `Video ${videoId} is already completed. Skipping.`);
+      logger.videoProgress(videoId, 'already processed', 'skipped');
+      const existingManifest = await loadVideoManifest(videoDir);
+      return {
+        videoId,
+        status: 'skipped',
+        videoDir,
+        manifest: existingManifest || undefined,
+      };
+    }
+
+    // Initialize or load manifest
+    let manifest = (await loadVideoManifest(videoDir)) || createInitialVideoManifest(videoId, targetUrl);
+    manifest.started_at = manifest.started_at || new Date().toISOString();
+    manifest.status = 'running';
+
+    console.log(`\n[VIDEO] ${videoId}`);
+
+    try {
+      // 3. Acquire Metadata (if needed)
+      let metadata: any = null;
+      const needMetadata = options.force || options.refresh || !fs.existsSync(metadataFile);
+
+      if (needMetadata) {
+        manifest.stages.metadata.started_at = new Date().toISOString();
+        if (options.metadata) {
+          metadata = options.metadata;
+        } else {
+          metadata = await tiktokAcquisition.getVideo(targetUrl);
+        }
+        await localStorage.writeJson(metadataFile, metadata);
+        manifest.stages.metadata.status = 'completed';
+        manifest.stages.metadata.completed_at = new Date().toISOString();
+        manifest.files.metadata = 'metadata.json';
+        logger.videoProgress(videoId, 'metadata', 'success');
+      } else {
+        metadata = await localStorage.readJson(metadataFile);
+        logger.videoProgress(videoId, 'metadata', 'skipped', 'cached');
+      }
+
+      // Handle only comment refresh mode
+      if (options.refreshComments && !options.force) {
+        manifest.stages.comments.started_at = new Date().toISOString();
+        const commentsResult = await tiktokAcquisition.getComments(videoId, targetUrl);
+        await localStorage.writeJson(commentsFile, commentsResult);
+        manifest.stages.comments.status = commentsResult.status;
+        manifest.stages.comments.completed_at = new Date().toISOString();
+        manifest.stages.comments.count = commentsResult.comments.length;
+        manifest.files.comments = 'comments.json';
+        logger.videoProgress(videoId, 'comments', commentsResult.status === 'completed' ? 'success' : 'unavailable', `${commentsResult.comments.length} items`);
+
+        manifest.status = 'completed';
+        manifest.completed_at = new Date().toISOString();
+        await saveVideoManifest(videoDir, manifest);
+        console.log(`[RESULT] comments refreshed for ${videoId}\n`);
+        return { videoId, status: 'completed', videoDir, manifest };
+      }
+
+      // 4. Download Video (or Photo Mode Slideshow)
+      const needVideo = options.force || !fs.existsSync(videoFile) || fs.statSync(videoFile).size === 0;
+      let sha256Val = manifest.hash?.value;
+
+      if (needVideo) {
+        manifest.stages.video.started_at = new Date().toISOString();
+        const mediaUrl = metadata?.media?.video_url;
+        const isPhotoMode = Boolean(
+          metadata?.media?.is_photo_mode ||
+          (metadata?.media?.images && metadata.media.images.length > 0) ||
+          metadata?.platform_specific?.imagePost
+        );
+
+        if (!mediaUrl && !isPhotoMode) {
+          throw new Error(`No media video URL found for video ${videoId}`);
+        }
+
+        if (isPhotoMode && !mediaUrl) {
+          // Photo Mode (Slideshow / Image Carousel) Processing
+          logger.stage('video', `Processing Photo Mode (slideshow) for item ${videoId}`);
+          const photoImages: string[] = metadata?.media?.images && metadata.media.images.length > 0
+            ? metadata.media.images
+            : (metadata?.platform_specific?.imagePost?.images || []).map((img: any) =>
+                img.imageURL?.urlList?.[0] || img.imageURL?.urlList?.[1] || img.display_image?.url_list?.[0]
+              ).filter(Boolean);
+
+          const imagesDir = path.join(videoDir, 'images');
+          await localStorage.ensureDir(imagesDir);
+
+          const downloadedImages: string[] = [];
+          for (let i = 0; i < photoImages.length; i++) {
+            const imgPath = path.join(imagesDir, `img_${i}.jpg`);
+            await mediaDownloader.downloadThumbnail(photoImages[i], imgPath, { referer: targetUrl });
+            if (fs.existsSync(imgPath) && fs.statSync(imgPath).size > 0) {
+              downloadedImages.push(imgPath);
+            }
+          }
+
+          // Download music audio if available
+          let audioFile: string | null = null;
+          const musicUrl = metadata?.media?.music_url || metadata?.platform_specific?.music?.playUrl;
+          if (musicUrl) {
+            try {
+              const audioPath = path.join(videoDir, 'audio.mp3');
+              const aRes = await fetch(musicUrl);
+              if (aRes.ok) {
+                const buf = Buffer.from(await aRes.arrayBuffer());
+                fs.writeFileSync(audioPath, buf);
+                audioFile = audioPath;
+              }
+            } catch (err: any) {
+              logger.debug(`Could not download music for photo mode: ${err.message}`);
+            }
+          }
+
+          // Generate playable MP4 slideshow via FFmpeg
+          await buildSlideshowMp4(downloadedImages, audioFile, videoFile);
+
+          const { calculateFileSha256 } = await import('../downloader/hash.js');
+          sha256Val = await calculateFileSha256(videoFile);
+          manifest.stages.video.status = 'completed';
+          manifest.stages.video.completed_at = new Date().toISOString();
+          manifest.files.video = 'video.mp4';
+          logger.videoProgress(videoId, 'video', 'success', `slideshow (${(fs.statSync(videoFile).size / 1024 / 1024).toFixed(2)} MB)`);
+
+          // Hash stage
+          manifest.stages.hash.status = 'completed';
+          manifest.stages.hash.completed_at = new Date().toISOString();
+          manifest.hash = { algorithm: 'sha256', value: sha256Val };
+          logger.videoProgress(videoId, 'sha256', 'success', sha256Val.slice(0, 12) + '...');
+        } else {
+          // Regular MP4 Video Download
+          const downloadRes = await mediaDownloader.downloadVideo(mediaUrl!, videoFile, {
+            cookies: metadata?.cookies,
+            referer: targetUrl,
+          });
+
+          sha256Val = downloadRes.sha256;
+          manifest.stages.video.status = 'completed';
+          manifest.stages.video.completed_at = new Date().toISOString();
+          manifest.files.video = 'video.mp4';
+          logger.videoProgress(videoId, 'video', 'success', `${(downloadRes.bytesDownloaded / 1024 / 1024).toFixed(2)} MB`);
+
+          // Hash stage
+          manifest.stages.hash.status = 'completed';
+          manifest.stages.hash.completed_at = new Date().toISOString();
+          manifest.hash = { algorithm: 'sha256', value: sha256Val };
+          logger.videoProgress(videoId, 'sha256', 'success', sha256Val.slice(0, 12) + '...');
+        }
+      } else {
+        logger.videoProgress(videoId, 'video', 'skipped', 'already downloaded');
+        if (!manifest.hash && fs.existsSync(videoFile)) {
+          const { calculateFileSha256 } = await import('../downloader/hash.js');
+          sha256Val = await calculateFileSha256(videoFile);
+          manifest.hash = { algorithm: 'sha256', value: sha256Val };
+        }
+        logger.videoProgress(videoId, 'sha256', 'success');
+      }
+
+      // 5. Download Thumbnail
+      const needThumb = options.force || !fs.existsSync(thumbnailFile);
+      const thumbUrl = metadata?.media?.thumbnail_url || (metadata?.media?.images && metadata.media.images[0]);
+      if (needThumb && thumbUrl) {
+        manifest.stages.thumbnail.started_at = new Date().toISOString();
+        const thumbOk = await mediaDownloader.downloadThumbnail(thumbUrl, thumbnailFile, {
+          referer: targetUrl,
+        });
+
+        if (thumbOk) {
+          manifest.stages.thumbnail.status = 'completed';
+          manifest.stages.thumbnail.completed_at = new Date().toISOString();
+          manifest.files.thumbnail = 'thumbnail.jpg';
+          logger.videoProgress(videoId, 'thumbnail', 'success');
+        } else {
+          manifest.stages.thumbnail.status = 'unavailable';
+          logger.videoProgress(videoId, 'thumbnail', 'unavailable');
+        }
+      } else if (fs.existsSync(thumbnailFile)) {
+        logger.videoProgress(videoId, 'thumbnail', 'skipped', 'cached');
+      } else {
+        manifest.stages.thumbnail.status = 'unavailable';
+        logger.videoProgress(videoId, 'thumbnail', 'unavailable');
+      }
+
+      // 6. FFprobe Technical Metadata
+      const needTech = options.force || !fs.existsSync(technicalFile);
+      if (needTech && fs.existsSync(videoFile)) {
+        manifest.stages.technical.started_at = new Date().toISOString();
+        const techData = await runFfprobe(videoFile);
+        await localStorage.writeJson(technicalFile, techData);
+        manifest.stages.technical.status = 'completed';
+        manifest.stages.technical.completed_at = new Date().toISOString();
+        manifest.files.technical = 'technical.json';
+        logger.videoProgress(videoId, 'technical', 'success', `${techData.width}x${techData.height} ${techData.fps}fps`);
+      } else if (fs.existsSync(technicalFile)) {
+        logger.videoProgress(videoId, 'technical', 'skipped', 'cached');
+      }
+
+      // 7. Comments
+      const needComments = options.force || !fs.existsSync(commentsFile);
+      if (needComments) {
+        manifest.stages.comments.started_at = new Date().toISOString();
+        const commentsResult = await tiktokAcquisition.getComments(videoId, targetUrl);
+        await localStorage.writeJson(commentsFile, commentsResult);
+        manifest.stages.comments.status = commentsResult.status;
+        manifest.stages.comments.completed_at = new Date().toISOString();
+        manifest.stages.comments.count = commentsResult.comments.length;
+        manifest.files.comments = 'comments.json';
+        logger.videoProgress(
+          videoId,
+          'comments',
+          commentsResult.status === 'completed' ? 'success' : 'unavailable',
+          `${commentsResult.comments.length} comments`
+        );
+      } else {
+        logger.videoProgress(videoId, 'comments', 'skipped', 'cached');
+      }
+
+      // 8. Finalize Manifest
+      manifest.status = 'completed';
+      manifest.completed_at = new Date().toISOString();
+      delete manifest.error;
+      await saveVideoManifest(videoDir, manifest);
+
+      console.log(`[RESULT] completed ${videoId}\n`);
+
+      return {
+        videoId,
+        status: 'completed',
+        videoDir,
+        manifest,
+      };
+    } catch (err: any) {
+      manifest.status = 'failed';
+      manifest.error = {
+        message: err.message,
+        stage: 'download',
+      };
+      await saveVideoManifest(videoDir, manifest);
+      logger.error(`Video ingestion failed for ${videoId}: ${err.message}`);
+      console.log(`[RESULT] failed ${videoId}\n`);
+
+      return {
+        videoId,
+        status: 'failed',
+        videoDir,
+        error: err.message,
+        manifest,
+      };
+    }
+  }
+}
+
+export const videoCrawler = new VideoCrawler();
+
+async function buildSlideshowMp4(images: string[], audioFile: string | null, outputFile: string): Promise<void> {
+  if (images.length === 0) {
+    throw new Error('No images available to create slideshow');
+  }
+
+  const { execFile } = await import('child_process');
+  const { promisify } = await import('util');
+  const execFileAsync = promisify(execFile);
+
+  const concatFile = path.join(path.dirname(outputFile), 'concat.txt');
+  let concatContent = '';
+  for (const img of images) {
+    concatContent += `file '${img.replace(/\\/g, '/')}'\n`;
+    concatContent += 'duration 3.0\n';
+  }
+  concatContent += `file '${images[images.length - 1].replace(/\\/g, '/')}'\n`;
+  fs.writeFileSync(concatFile, concatContent);
+
+  const args = [
+    '-y',
+    '-f', 'concat',
+    '-safe', '0',
+    '-i', concatFile,
+  ];
+
+  if (audioFile && fs.existsSync(audioFile)) {
+    args.push('-i', audioFile);
+    args.push(
+      '-c:v', 'libx264',
+      '-pix_fmt', 'yuv420p',
+      '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+      '-c:a', 'aac',
+      '-shortest',
+      outputFile
+    );
+  } else {
+    args.push(
+      '-c:v', 'libx264',
+      '-pix_fmt', 'yuv420p',
+      '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
+      outputFile
+    );
+  }
+
+  await execFileAsync(config.ffmpegPath, args);
+
+  if (fs.existsSync(concatFile)) {
+    try { fs.unlinkSync(concatFile); } catch {}
+  }
+}

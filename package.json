@@ -1,0 +1,35 @@
+{
+  "name": "tiktok-crawler",
+  "version": "1.0.0",
+  "description": "Standalone TikTok Video & Profile Crawler",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx src/cli/index.ts",
+    "start": "tsx src/cli/index.ts",
+    "ui": "tsx src/server/index.ts",
+    "build": "tsc",
+    "test": "tsx --test tests/**/*.test.ts"
+  },
+  "keywords": [
+    "tiktok",
+    "crawler",
+    "scraper",
+    "dataset"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^13.1.0",
+    "dotenv": "^16.4.7",
+    "playwright": "^1.50.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.5",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
