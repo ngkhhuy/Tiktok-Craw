@@ -975,6 +975,7 @@ async function startCrawlJob(input, type) {
 
         // Nếu có video mới vừa hoàn tất: tự động fetch và cập nhật danh sách video
         const currentCompletedCount = (progress.completedVideos || []).length;
+        const currentSkippedCount = (progress.skippedVideos || []).length;
         if (currentCompletedCount > previousCompletedCount) {
           previousCompletedCount = currentCompletedCount;
           // Reload videos list in background
@@ -986,14 +987,22 @@ async function startCrawlJob(input, type) {
           clearInterval(state.crawlPollTimer);
           state.crawlPollTimer = null;
           elements.ingest.progressBarFill.style.width = '100%';
-          elements.ingest.progressStatusText.textContent = `✓ Hoàn tất trích xuất! Đã tải thành công ${currentCompletedCount} video.`;
+          if (progress.message) {
+            elements.ingest.progressStatusText.textContent = progress.message;
+          } else if (currentCompletedCount === 0 && currentSkippedCount > 0) {
+            elements.ingest.progressStatusText.textContent = `✓ Hoàn tất! Toàn bộ ${currentSkippedCount} video đã có sẵn trên máy.`;
+          } else if (currentCompletedCount === 0) {
+            elements.ingest.progressStatusText.textContent = `⚠️ Hoàn tất! Không tìm thấy video mới nào cần tải.`;
+          } else {
+            elements.ingest.progressStatusText.textContent = `✓ Hoàn tất trích xuất! Đã tải mới ${currentCompletedCount} video${currentSkippedCount > 0 ? ` (${currentSkippedCount} video đã có sẵn)` : ''}.`;
+          }
           elements.ingest.btnStopCrawl.disabled = true;
-          showToast(`🎉 Đã trích xuất xong toàn bộ video!`);
+          showToast(`🎉 Trích xuất hoàn tất!`);
           fetchVideos();
         } else if (sData.status === 'stopped') {
           clearInterval(state.crawlPollTimer);
           state.crawlPollTimer = null;
-          elements.ingest.progressStatusText.textContent = '⏹ Tiến trình cào đã được dừng.';
+          elements.ingest.progressStatusText.textContent = progress.message || '⏹ Tiến trình cào đã được dừng.';
           elements.ingest.btnStopCrawl.disabled = true;
           showToast('Tiến trình đã dừng.');
           fetchVideos();

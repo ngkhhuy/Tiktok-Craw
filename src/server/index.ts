@@ -6,6 +6,8 @@ import { logger } from '../utils/logger.js';
 import { tiktokAcquisition } from '../acquisition/tiktok/index.js';
 import { profileCrawler } from '../crawler/profile-crawler.js';
 import { videoCrawler } from '../crawler/video-crawler.js';
+import { localStorage } from '../storage/local-storage.js';
+import { queryVideos, getVideoById, getVideoStats, rebuildIndex } from '../storage/database.js';
 
 export interface CrawlJob {
   id: string;
@@ -36,6 +38,8 @@ export interface CrawlJob {
     currentVideoId?: string;
     currentVideoTitle?: string;
     completedVideos: string[];
+    skippedVideos: string[];
+    failedVideos: string[];
     viewsAccumulated: number;
   };
   error?: string;
@@ -119,140 +123,86 @@ interface VideoItemSummary {
   directory: string;
 }
 
-export function scanAllVideos(): { items: VideoItemSummary[]; totalSize: number; totalComments: number } {
-  const baseDataDir = config.dataDir;
-  const items: VideoItemSummary[] = [];
-  let totalSize = 0;
-  let totalComments = 0;
-
-  // 1. Single videos directory: data/videos/<VIDEO_ID>
-  const singleVideosDir = path.join(baseDataDir, 'videos');
-  if (fs.existsSync(singleVideosDir)) {
-    const entries = fs.readdirSync(singleVideosDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        const item = loadVideoItem(path.join(singleVideosDir, entry.name), entry.name);
-        if (item) {
-          items.push(item);
-          totalSize += item.fileSize;
-          totalComments += item.commentsCount;
-        }
-      }
-    }
-  }
-
-  // 2. Profile videos directory: data/profiles/<PROFILE_ID>/videos/<VIDEO_ID>
-  const profilesDir = path.join(baseDataDir, 'profiles');
-  if (fs.existsSync(profilesDir)) {
-    const profileEntries = fs.readdirSync(profilesDir, { withFileTypes: true });
-    for (const pEntry of profileEntries) {
-      if (pEntry.isDirectory()) {
-        const pVideosDir = path.join(profilesDir, pEntry.name, 'videos');
-        if (fs.existsSync(pVideosDir)) {
-          const vEntries = fs.readdirSync(pVideosDir, { withFileTypes: true });
-          for (const vEntry of vEntries) {
-            if (vEntry.isDirectory()) {
-              const item = loadVideoItem(path.join(pVideosDir, vEntry.name), vEntry.name, pEntry.name);
-              if (item) {
-                items.push(item);
-                totalSize += item.fileSize;
-                totalComments += item.commentsCount;
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // Sort descending by publication date or video ID
-  items.sort((a, b) => {
-    if (a.publishedAt && b.publishedAt) {
-      return new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime();
-    }
-    return b.videoId.localeCompare(a.videoId);
+export function scanAllVideos(options: {
+  page?: number;
+  limit?: number;
+  sort?: 'newest' | 'oldest' | 'views' | 'likes' | 'size';
+  search?: string;
+  profileId?: string;
+} = {}): {
+  items: VideoItemSummary[];
+  totalCount: number;
+  totalSize: number;
+  totalComments: number;
+  page: number;
+  totalPages: number;
+} {
+  const result = queryVideos({
+    page: options.page || 1,
+    limit: options.limit || 100,
+    sort: options.sort,
+    search: options.search,
+    profileId: options.profileId,
   });
 
-  return { items, totalSize, totalComments };
-}
+  const items: VideoItemSummary[] = result.videos.map((v) => ({
+    videoId: v.video_id,
+    profileId: v.profile_id || undefined,
+    username: v.username || 'unknown',
+    displayName: v.display_name || v.username || '',
+    avatarUrl: v.avatar_url || '',
+    description: v.description || '',
+    publishedAt: v.published_at || null,
+    videoUrl: `/media/stream/${v.video_id}?profileId=${v.profile_id || ''}`,
+    thumbnailUrl: `/media/thumb/${v.video_id}?profileId=${v.profile_id || ''}`,
+    duration: v.duration || 0,
+    width: v.width || 0,
+    height: v.height || 0,
+    fps: v.fps || 30,
+    videoCodec: v.video_codec || 'h264',
+    fileSize: v.file_size || 0,
+    views: v.views || 0,
+    likes: v.likes || 0,
+    commentsCount: v.comments_count || 0,
+    sha256: v.sha256,
+    directory: v.directory,
+  }));
 
-function loadVideoItem(dirPath: string, videoId: string, profileId?: string): VideoItemSummary | null {
-  const metaPath = path.join(dirPath, 'metadata.json');
-  const techPath = path.join(dirPath, 'technical.json');
-  const manifestPath = path.join(dirPath, 'manifest.json');
-  const videoFilePath = path.join(dirPath, 'video.mp4');
-
-  if (!fs.existsSync(metaPath)) return null;
-
-  try {
-    const metadata = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
-    let technical: any = {};
-    if (fs.existsSync(techPath)) {
-      try {
-        technical = JSON.parse(fs.readFileSync(techPath, 'utf-8'));
-      } catch {}
-    }
-
-    let manifest: any = {};
-    if (fs.existsSync(manifestPath)) {
-      try {
-        manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
-      } catch {}
-    }
-
-    const fileSize = fs.existsSync(videoFilePath) ? fs.statSync(videoFilePath).size : (technical.file_size || 0);
-
-    return {
-      videoId,
-      profileId,
-      username: metadata.author?.username || 'unknown',
-      displayName: metadata.author?.display_name || metadata.author?.username || '',
-      avatarUrl: metadata.author?.avatar_url || '',
-      description: metadata.content?.description || '',
-      publishedAt: metadata.published_at || null,
-      videoUrl: `/media/stream/${videoId}?profileId=${profileId || ''}`,
-      thumbnailUrl: `/media/thumb/${videoId}?profileId=${profileId || ''}`,
-      duration: technical.duration || metadata.media?.duration || 0,
-      width: technical.width || metadata.media?.width || 0,
-      height: technical.height || metadata.media?.height || 0,
-      fps: technical.fps || 30,
-      videoCodec: technical.video_codec || 'h264',
-      fileSize,
-      views: metadata.engagement?.views || 0,
-      likes: metadata.engagement?.likes || 0,
-      commentsCount: metadata.engagement?.comments || 0,
-      sha256: manifest.hash?.value,
-      directory: dirPath,
-    };
-  } catch {
-    return null;
-  }
+  return {
+    items,
+    totalCount: result.total,
+    totalSize: result.totalSize,
+    totalComments: result.totalComments,
+    page: result.page,
+    totalPages: result.totalPages,
+  };
 }
 
 export function findVideoDir(videoId: string, profileId?: string): string | null {
-  const baseDataDir = config.dataDir;
-  if (profileId) {
-    const pPath = path.join(baseDataDir, 'profiles', profileId, 'videos', videoId);
-    if (fs.existsSync(pPath)) return pPath;
-  }
-
-  const sPath = path.join(baseDataDir, 'videos', videoId);
-  if (fs.existsSync(sPath)) return sPath;
-
-  // Search in all profiles
-  const profilesDir = path.join(baseDataDir, 'profiles');
-  if (fs.existsSync(profilesDir)) {
-    const pEntries = fs.readdirSync(profilesDir);
-    for (const p of pEntries) {
-      const candidate = path.join(profilesDir, p, 'videos', videoId);
-      if (fs.existsSync(candidate)) return candidate;
+  // 1. Fast SQLite lookup
+  try {
+    const record = getVideoById(videoId);
+    if (record?.directory && fs.existsSync(record.directory)) {
+      return record.directory;
     }
-  }
+  } catch {}
 
-  return null;
+  // 2. Storage resolver (checks sharded + legacy paths)
+  return localStorage.findVideoDir(videoId, profileId);
 }
 
 export function createServer(port: number = 3000) {
+  // Ensure database index is initialized from disk if empty
+  try {
+    const stats = getVideoStats();
+    if (stats.total === 0) {
+      console.log('[INDEX] SQLite index is empty, rebuilding from disk...');
+      rebuildIndex();
+    }
+  } catch (err: any) {
+    console.warn('[INDEX] Note on DB initialization:', err.message);
+  }
+
   const server = http.createServer(async (req, res) => {
     const parsedUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     const pathname = parsedUrl.pathname;
@@ -369,6 +319,8 @@ export function createServer(port: number = 3000) {
             current: 0,
             total: 0,
             completedVideos: [],
+            skippedVideos: [],
+            failedVideos: [],
             viewsAccumulated: 0,
           },
           abortController,
@@ -404,6 +356,14 @@ export function createServer(port: number = 3000) {
                     if (!job.progress.completedVideos.includes(evt.videoId)) {
                       job.progress.completedVideos.push(evt.videoId);
                     }
+                  } else if (evt.status === 'skipped' && evt.videoId) {
+                    if (!job.progress.skippedVideos.includes(evt.videoId)) {
+                      job.progress.skippedVideos.push(evt.videoId);
+                    }
+                  } else if (evt.status === 'failed' && evt.videoId) {
+                    if (!job.progress.failedVideos.includes(evt.videoId)) {
+                      job.progress.failedVideos.push(evt.videoId);
+                    }
                   }
                   if (evt.views) {
                     job.progress.viewsAccumulated += evt.views;
@@ -415,12 +375,19 @@ export function createServer(port: number = 3000) {
                     : evt.stage === 'downloading'
                     ? `Đang tải video [${job.progress.current}/${job.progress.total}]: ${evt.videoTitle || evt.videoId || ''}`
                     : evt.stage === 'completed'
-                    ? `✓ Hoàn tất trích xuất! Đã tải ${job.progress.completedVideos.length} video.`
+                    ? (job.progress.completedVideos.length === 0 && job.progress.skippedVideos.length > 0
+                        ? `✓ Hoàn tất! Toàn bộ ${job.progress.skippedVideos.length} video đã có sẵn trên máy (bỏ qua tải lại).`
+                        : job.progress.completedVideos.length === 0 && (job.progress.total === 0 || job.progress.skippedVideos.length === 0)
+                        ? `⚠️ Không tìm thấy video nào khả dụng trên kênh @${cleanUsername}.`
+                        : `✓ Hoàn tất trích xuất! Đã tải mới ${job.progress.completedVideos.length} video${job.progress.skippedVideos.length > 0 ? ` (${job.progress.skippedVideos.length} video đã có sẵn)` : ''}.`)
+                    : evt.stage === 'interrupted'
+                    ? `⏹ Tiến trình cào đã dừng. Đã tải ${job.progress.completedVideos.length} video.`
                     : 'Đang xử lý...';
                 }
               });
 
-              job.status = abortController.signal.aborted ? 'stopped' : 'completed';
+              const isStopped = abortController.signal.aborted || job.progress.stage === 'interrupted';
+              job.status = isStopped ? 'stopped' : 'completed';
               job.endTime = new Date().toISOString();
             } else {
               job.progress.stage = 'downloading';
@@ -491,11 +458,52 @@ export function createServer(port: number = 3000) {
       return;
     }
 
-    // 1. API: /api/videos
+    // 1. API: /api/videos (with SQLite pagination, sorting, filtering)
     if (pathname === '/api/videos') {
-      const { items, totalSize, totalComments } = scanAllVideos();
+      const page = parsedUrl.searchParams.get('page') ? parseInt(parsedUrl.searchParams.get('page')!, 10) : undefined;
+      const limit = parsedUrl.searchParams.get('limit') ? parseInt(parsedUrl.searchParams.get('limit')!, 10) : undefined;
+      const sort = (parsedUrl.searchParams.get('sort') || undefined) as any;
+      const search = parsedUrl.searchParams.get('search') || undefined;
+      const profileId = parsedUrl.searchParams.get('profileId') || undefined;
+
+      const { items, totalCount, totalSize, totalComments, page: curPage, totalPages } = scanAllVideos({
+        page,
+        limit,
+        sort,
+        search,
+        profileId,
+      });
+
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ videos: items, totalCount: items.length, totalSize, totalComments }));
+      res.end(JSON.stringify({
+        videos: items,
+        totalCount,
+        totalSize,
+        totalComments,
+        page: curPage,
+        totalPages,
+      }));
+      return;
+    }
+
+    // 1.1 API: /api/rebuild-index
+    if (req.method === 'POST' && pathname === '/api/rebuild-index') {
+      try {
+        const stats = rebuildIndex();
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ success: true, ...stats }));
+      } catch (err: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+      return;
+    }
+
+    // 1.2 API: /api/stats
+    if (pathname === '/api/stats') {
+      const stats = getVideoStats();
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(stats));
       return;
     }
 

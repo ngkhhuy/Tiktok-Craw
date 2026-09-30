@@ -11,11 +11,15 @@ import { ConcurrencyLimiter } from '../utils/concurrency.js';
 import { logger } from '../utils/logger.js';
 import { config } from '../config/index.js';
 import { ProfileCrawlManifest } from '../storage/types.js';
+import { upsertProfile } from '../storage/database.js';
 
 export interface ProfileProgressEvent {
   stage: 'resolving' | 'discovering' | 'downloading' | 'completed' | 'interrupted' | 'failed';
   current?: number;
   total?: number;
+  completed?: number;
+  skipped?: number;
+  failed?: number;
   videoId?: string;
   videoTitle?: string;
   status?: 'completed' | 'skipped' | 'failed';
@@ -52,6 +56,7 @@ export class ProfileCrawler {
   }
 
   async crawl(profileUrl: string, options: ProfileCrawlerOptions = {}): Promise<ProfileCrawlManifest | null> {
+    this.isInterrupted = false;
     const parsed = await tiktokAcquisition.parseAndResolveUrl(profileUrl);
 
     if (parsed.type !== 'profile' || !parsed.username) {
@@ -74,6 +79,25 @@ export class ProfileCrawler {
     const profileFile = path.join(profileDir, 'profile.json');
     await localStorage.writeJson(profileFile, profile);
     logger.stage('profile', `Saved profile information to ${profileFile}`);
+
+    try {
+      upsertProfile({
+        profile_id: profile.profile_id,
+        username: profile.username,
+        display_name: profile.display_name,
+        avatar_url: profile.avatar_url,
+        bio: profile.bio,
+        profile_url: profile.profile_url,
+        followers: profile.stats.followers,
+        following: profile.stats.following,
+        likes: profile.stats.likes,
+        videos_count: profile.stats.videos,
+        status: 'completed',
+        sec_uid: profile.sec_uid,
+      });
+    } catch (e: any) {
+      logger.warn(`Failed to index profile @${username} into SQLite: ${e.message}`);
+    }
 
     options.onProgress?.({
       stage: 'discovering',
@@ -189,8 +213,11 @@ export class ProfileCrawler {
 
     options.onProgress?.({
       stage: finalStatus === 'completed' ? 'completed' : 'interrupted',
-      current: completedCount,
+      current: completedCount + skippedCount,
       total,
+      completed: completedCount,
+      skipped: skippedCount,
+      failed: failedCount,
     });
 
     console.log(`\n[SUMMARY] Profile crawl @${username}`);

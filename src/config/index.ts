@@ -57,9 +57,10 @@ function detectFfmpegPath(): string {
 }
 
 export const config = {
-  videoConcurrency: getEnvNumber('TIKTOK_VIDEO_CONCURRENCY', 2),
+  videoConcurrency: getEnvNumber('TIKTOK_VIDEO_CONCURRENCY', 5),
   commentConcurrency: getEnvNumber('TIKTOK_COMMENT_CONCURRENCY', 2),
-  requestDelayMs: getEnvNumber('TIKTOK_REQUEST_DELAY_MS', 500),
+  requestDelayMs: getEnvNumber('TIKTOK_REQUEST_DELAY_MS', 300),
+  mediaRequestDelayMs: getEnvNumber('TIKTOK_MEDIA_REQUEST_DELAY_MS', 50),
   maxCommentsPerVideo: getEnvNumber('MAX_COMMENTS_PER_VIDEO', 1000),
   maxCommentPages: getEnvNumber('MAX_COMMENT_PAGES', 20),
   maxRetries: getEnvNumber('MAX_RETRIES', 3),

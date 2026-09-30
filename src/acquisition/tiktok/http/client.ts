@@ -99,3 +99,7 @@ export class TikTokHttpClient {
 }
 
 export const httpClient = new TikTokHttpClient();
+
+// Separate client for media CDN downloads (thumbnail, images)
+// with much lower rate limit since CDN servers are distributed and don't share rate limits with tiktok.com API
+export const mediaHttpClient = new TikTokHttpClient(config.mediaRequestDelayMs);

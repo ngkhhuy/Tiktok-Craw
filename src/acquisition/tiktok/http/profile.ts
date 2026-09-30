@@ -6,7 +6,7 @@ import {
   ProfileDiscoveryResult,
   DiscoveredVideoReference,
 } from '../types.js';
-import { extractRehydrationData } from './video.js';
+import { extractRehydrationData, normalizeVideoMetadata } from './video.js';
 
 export function normalizeProfileData(rawUserDetail: any, username: string): NormalizedTikTokProfile {
   const userInfo = rawUserDetail?.userInfo || {};
@@ -91,11 +91,16 @@ export async function discoverProfileVideosHttp(
           const vId = String(item.id || item.video_id);
           if (vId && !seenVideoIds.has(vId)) {
             seenVideoIds.add(vId);
+            const itemUrl = `https://www.tiktok.com/@${profile.username}/video/${vId}`;
+            // Pre-enrich normalized metadata from rehydration data
+            // This avoids a separate HTTP fetch per video during crawl
+            const normalized = normalizeVideoMetadata(item, itemUrl, res.cookies);
             videos.push({
               video_id: vId,
-              url: `https://www.tiktok.com/@${profile.username}/video/${vId}`,
-              published_at: item.createTime ? new Date(Number(item.createTime) * 1000).toISOString() : null,
-              description: item.desc || null,
+              url: itemUrl,
+              published_at: normalized.published_at,
+              description: normalized.content.description || item.desc || null,
+              normalized,
             });
           }
         }

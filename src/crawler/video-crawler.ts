@@ -14,6 +14,7 @@ import { logger } from '../utils/logger.js';
 import { config } from '../config/index.js';
 import { VideoManifest } from '../storage/types.js';
 import { NormalizedTikTokVideo } from '../acquisition/tiktok/types.js';
+import { upsertVideo } from '../storage/database.js';
 
 export interface VideoCrawlerOptions {
   profileId?: string;
@@ -61,6 +62,43 @@ export class VideoCrawler {
       logger.stage('video', `Video ${videoId} is already completed. Skipping.`);
       logger.videoProgress(videoId, 'already processed', 'skipped');
       const existingManifest = await loadVideoManifest(videoDir);
+
+      try {
+        let metaObj: any = null;
+        if (fs.existsSync(metadataFile)) {
+          metaObj = JSON.parse(fs.readFileSync(metadataFile, 'utf-8'));
+        }
+        let techObj: any = null;
+        if (fs.existsSync(technicalFile)) {
+          try { techObj = JSON.parse(fs.readFileSync(technicalFile, 'utf-8')); } catch {}
+        }
+        const videoFileSize = fs.existsSync(videoFile) ? fs.statSync(videoFile).size : 0;
+        upsertVideo({
+          video_id: videoId,
+          profile_id: options.profileId || null,
+          username: metaObj?.author?.username || '',
+          display_name: metaObj?.author?.display_name || '',
+          avatar_url: metaObj?.author?.avatar_url || '',
+          description: metaObj?.content?.description || '',
+          published_at: metaObj?.published_at || null,
+          views: metaObj?.engagement?.views || 0,
+          likes: metaObj?.engagement?.likes || 0,
+          comments_count: metaObj?.engagement?.comments || 0,
+          shares: metaObj?.engagement?.shares || 0,
+          saves: metaObj?.engagement?.saves || 0,
+          duration: techObj?.duration || metaObj?.media?.duration || 0,
+          width: techObj?.width || metaObj?.media?.width || 0,
+          height: techObj?.height || metaObj?.media?.height || 0,
+          fps: techObj?.fps || 0,
+          video_codec: techObj?.video_codec || '',
+          file_size: videoFileSize,
+          sha256: existingManifest?.hash?.value || null,
+          status: 'completed',
+          is_photo_mode: Boolean(metaObj?.media?.is_photo_mode),
+          directory: videoDir,
+        });
+      } catch {}
+
       return {
         videoId,
         status: 'skipped',
@@ -274,11 +312,53 @@ export class VideoCrawler {
         logger.videoProgress(videoId, 'comments', 'skipped', 'cached');
       }
 
-      // 8. Finalize Manifest
+      // 8. Finalize Manifest & Index to Database
       manifest.status = 'completed';
       manifest.completed_at = new Date().toISOString();
       delete manifest.error;
       await saveVideoManifest(videoDir, manifest);
+
+      try {
+        let techObj: any = null;
+        if (fs.existsSync(technicalFile)) {
+          try { techObj = JSON.parse(fs.readFileSync(technicalFile, 'utf-8')); } catch {}
+        }
+        let comCount = metadata?.engagement?.comments || 0;
+        if (fs.existsSync(commentsFile)) {
+          try {
+            const comObj = JSON.parse(fs.readFileSync(commentsFile, 'utf-8'));
+            if (Array.isArray(comObj?.comments)) comCount = comObj.comments.length;
+          } catch {}
+        }
+        const videoFileSize = fs.existsSync(videoFile) ? fs.statSync(videoFile).size : 0;
+
+        upsertVideo({
+          video_id: videoId,
+          profile_id: options.profileId || null,
+          username: metadata?.author?.username || '',
+          display_name: metadata?.author?.display_name || '',
+          avatar_url: metadata?.author?.avatar_url || '',
+          description: metadata?.content?.description || '',
+          published_at: metadata?.published_at || null,
+          views: metadata?.engagement?.views || 0,
+          likes: metadata?.engagement?.likes || 0,
+          comments_count: comCount,
+          shares: metadata?.engagement?.shares || 0,
+          saves: metadata?.engagement?.saves || 0,
+          duration: techObj?.duration || metadata?.media?.duration || 0,
+          width: techObj?.width || metadata?.media?.width || 0,
+          height: techObj?.height || metadata?.media?.height || 0,
+          fps: techObj?.fps || 0,
+          video_codec: techObj?.video_codec || '',
+          file_size: videoFileSize,
+          sha256: manifest.hash?.value || null,
+          status: 'completed',
+          is_photo_mode: Boolean(metadata?.media?.is_photo_mode),
+          directory: videoDir,
+        });
+      } catch (dbErr: any) {
+        logger.warn(`Failed to index video ${videoId} into database: ${dbErr.message}`);
+      }
 
       console.log(`[RESULT] completed ${videoId}\n`);
 

@@ -1,10 +1,11 @@
-import { describe, it } from 'node:test';
+import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import { resolveTikTokUrl } from '../../src/acquisition/tiktok/resolver.js';
 import { videoCrawler } from '../../src/crawler/video-crawler.js';
 import { localStorage } from '../../src/storage/local-storage.js';
+import { browserFallback } from '../../src/acquisition/tiktok/browser/fallback.js';
 
 describe('Video Pipeline Integration', () => {
   it('should resolve real TikTok short URLs via HTTP redirect', async () => {
@@ -64,5 +65,9 @@ describe('Video Pipeline Integration', () => {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
     assert.equal(manifest.status, 'completed');
     assert.ok(manifest.hash?.value, 'SHA-256 hash must be recorded in manifest');
+  });
+
+  after(async () => {
+    await browserFallback.close().catch(() => {});
   });
 });

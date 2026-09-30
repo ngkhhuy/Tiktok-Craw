@@ -23,11 +23,56 @@ export class LocalStorage implements Storage {
     return path.resolve(this.baseDir, ...segments);
   }
 
+  /**
+   * Get the sharded video directory path.
+   * Uses 2-level sharding based on video_id characters to keep each folder < 1000 entries.
+   * Example: video_id "7689814919914458374" → data/videos/76/89/7689814919914458374/
+   */
   getVideoDir(videoId: string, profileId?: string): string {
+    const shard1 = videoId.slice(0, 2);
+    const shard2 = videoId.slice(2, 4);
     if (profileId) {
-      return this.getPath('profiles', profileId, 'videos', videoId);
+      return this.getPath('profiles', profileId, 'videos', shard1, shard2, videoId);
     }
-    return this.getPath('videos', videoId);
+    return this.getPath('videos', shard1, shard2, videoId);
+  }
+
+  /**
+   * Find a video directory, checking both new sharded and legacy flat paths.
+   * Essential for backward compatibility with existing data.
+   */
+  findVideoDir(videoId: string, profileId?: string): string | null {
+    // 1. Check new sharded path first
+    const shardedPath = this.getVideoDir(videoId, profileId);
+    if (fs.existsSync(shardedPath)) return shardedPath;
+
+    // 2. Check legacy flat path
+    if (profileId) {
+      const legacyPath = this.getPath('profiles', profileId, 'videos', videoId);
+      if (fs.existsSync(legacyPath)) return legacyPath;
+    }
+    const legacySinglePath = this.getPath('videos', videoId);
+    if (fs.existsSync(legacySinglePath)) return legacySinglePath;
+
+    // 3. Search across all profiles (legacy)
+    const profilesDir = this.getPath('profiles');
+    if (fs.existsSync(profilesDir)) {
+      try {
+        const pEntries = fs.readdirSync(profilesDir);
+        for (const p of pEntries) {
+          // Check sharded path under each profile
+          const shard1 = videoId.slice(0, 2);
+          const shard2 = videoId.slice(2, 4);
+          const candidate1 = this.getPath('profiles', p, 'videos', shard1, shard2, videoId);
+          if (fs.existsSync(candidate1)) return candidate1;
+          // Check legacy flat path under each profile
+          const candidate2 = this.getPath('profiles', p, 'videos', videoId);
+          if (fs.existsSync(candidate2)) return candidate2;
+        }
+      } catch {}
+    }
+
+    return null;
   }
 
   getProfileDir(profileId: string): string {

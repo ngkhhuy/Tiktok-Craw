@@ -20,11 +20,13 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "better-sqlite3": "^13.0.3",
     "commander": "^13.1.0",
     "dotenv": "^16.4.7",
     "playwright": "^1.50.1"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.13.5",
     "tsx": "^4.19.3",
     "typescript": "^5.7.3"
