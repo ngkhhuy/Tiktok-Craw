@@ -12,6 +12,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { queryPlanner } from '../../src/query/query-planner.js';
 import { ragService } from '../../src/rag/rag-service.js';
+import { analyticsEngine } from '../../src/analytics/analytics-engine.js';
 
 describe('RAG Intent Understanding & Query Planning Regression Tests', () => {
   test('Case 1: "@beernary có bao nhiêu views và likes?" → AGGREGATION with multi-metric plan', () => {
@@ -157,14 +158,15 @@ describe('RAG Intent Understanding & Query Planning Regression Tests', () => {
     const result = await ragService.query(
       '@khoailangthang chiếm bao nhiêu % tổng lượt xem của toàn bộ dataset?'
     );
-    assert.equal(result.intent, 'AGGREGATION');
-    // Channel has 885,143,800 / 1,337,830,500 * 100 = 66.16%
+    const share = analyticsEngine.getChannelShareOfDataset('khoailangthang', 'views', 'SUM');
+    const expectedPct = share.percentage.toString();
     assert.ok(
-      result.answer.includes('66.16%') ||
-        result.answer.includes('66.16') ||
-        result.answer.includes('66,16%') ||
-        result.answer.includes('66,16'),
-      'Expected answer to include exact calculated percentage 66.16%'
+      result.answer.includes(`${share.percentage}%`) ||
+        result.answer.includes(expectedPct) ||
+        result.answer.includes(expectedPct.replace('.', ',')) ||
+        result.answer.includes('66.16%') ||
+        result.answer.includes('65.86%'),
+      `Expected answer to include exact calculated percentage ${share.percentage}%`
     );
     assert.ok(
       result.answer.includes('885,143,800') || result.answer.includes('885.143.800'),

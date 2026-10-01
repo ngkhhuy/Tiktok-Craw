@@ -132,6 +132,49 @@ export class SemanticRetriever {
   /**
    * Auto-indexes dataset if vector store is empty.
    */
+  /**
+   * Indexes comments for a specific video on-demand into the vector store.
+   */
+  async indexVideoComments(videoId: string, maxComments: number = 30): Promise<number> {
+    const comments = this.db
+      .prepare(`
+        SELECT comment_id, video_id, author_username, text, like_count, published_at
+        FROM comments
+        WHERE video_id = ? AND text IS NOT NULL AND length(trim(text)) > 3
+        ORDER BY like_count DESC, published_at DESC
+        LIMIT ?
+      `)
+      .all(videoId, maxComments) as any[];
+
+    if (comments.length === 0) return 0;
+
+    const dims = embeddingService.getDimensions();
+    const model = embeddingService.getModelName();
+    const texts = comments.map((c) => c.text);
+    const embeddings = await embeddingService.embedBatch(texts);
+
+    const records: VectorRecord[] = comments.map((c, idx) => ({
+      id: `comment_${c.comment_id}`,
+      entityType: 'comment',
+      entityId: c.comment_id,
+      chunkText: c.text,
+      embedding: embeddings[idx],
+      dimensions: dims,
+      model,
+      metadata: {
+        video_id: c.video_id,
+        username: c.author_username,
+        like_count: c.like_count,
+        published_at: c.published_at,
+      },
+    }));
+
+    return vectorStore.upsertBatch(records);
+  }
+
+  /**
+   * Auto-indexes dataset if vector store is empty.
+   */
   async ensureIndexed(): Promise<void> {
     const count = vectorStore.count();
     if (count === 0) {
@@ -148,6 +191,16 @@ export class SemanticRetriever {
   async retrieve(query: string, options: RetrievalOptions = {}): Promise<RetrievedChunk[]> {
     await this.ensureIndexed();
 
+    if (options.videoId) {
+      const hasVectors = this.db
+        .prepare("SELECT 1 FROM vector_embeddings WHERE entity_id = ? OR json_extract(metadata_json, '$.video_id') = ? LIMIT 1")
+        .get(options.videoId, options.videoId);
+
+      if (!hasVectors) {
+        await this.indexVideoComments(options.videoId, 30);
+      }
+    }
+
     const limit = options.limit || 8;
     const lambda = options.diversityLambda !== undefined ? options.diversityLambda : 0.7; // 0.7 balances relevance and diversity
     const queryVector = await embeddingService.embedText(query);
@@ -156,6 +209,7 @@ export class SemanticRetriever {
     const candidateLimit = Math.max(limit * 3, 25);
     const matches = vectorStore.search(queryVector, {
       entityType: options.entityType,
+      videoId: options.videoId,
       limit: candidateLimit,
       minSimilarity: options.minSimilarity ?? 0.05,
     });
@@ -224,6 +278,42 @@ export class SemanticRetriever {
     const limit = options.limit || 8;
     const clean = query.replace(/[^\p{L}\p{N}\s]/gu, ' ').trim();
     const tokens = clean.split(/\s+/).filter((t) => t.length > 2);
+
+    if (options.videoId) {
+      let rows: any[] = [];
+      if (tokens.length > 0) {
+        const likeClauses = tokens.map(() => 'text LIKE ?').join(' OR ');
+        const params = tokens.map((t) => `%${t}%`);
+        rows = this.db
+          .prepare(
+            `SELECT comment_id, video_id, author_username, text, like_count, published_at FROM comments WHERE video_id = ? AND (${likeClauses}) ORDER BY like_count DESC LIMIT ?`
+          )
+          .all(options.videoId, ...params, limit) as any[];
+      }
+
+      if (rows.length === 0) {
+        rows = this.db
+          .prepare(
+            `SELECT comment_id, video_id, author_username, text, like_count, published_at FROM comments WHERE video_id = ? ORDER BY like_count DESC LIMIT ?`
+          )
+          .all(options.videoId, limit) as any[];
+      }
+
+      return rows.map((r) => ({
+        id: `comment_${r.comment_id}`,
+        entity_type: 'comment',
+        entity_id: r.comment_id,
+        text: r.text,
+        score: 0.5,
+        metadata: {
+          video_id: r.video_id,
+          username: r.author_username,
+          like_count: r.like_count,
+          published_at: r.published_at,
+        },
+      }));
+    }
+
     if (tokens.length === 0) return [];
 
     const likeClauses = tokens.map(() => 'text LIKE ?').join(' OR ');

@@ -34,6 +34,7 @@ export interface VectorSearchOptions {
   limit?: number;
   minSimilarity?: number;
   entityId?: string;
+  videoId?: string;
 }
 
 export class SQLiteVectorStore {
@@ -158,6 +159,10 @@ export class SQLiteVectorStore {
     if (options.entityId) {
       sql += ' AND entity_id = ?';
       params.push(options.entityId);
+    }
+    if (options.videoId) {
+      sql += ' AND (entity_id = ? OR json_extract(metadata_json, \'$.video_id\') = ?)';
+      params.push(options.videoId, options.videoId);
     }
 
     const rows = this.db.prepare(sql).all(...params) as any[];

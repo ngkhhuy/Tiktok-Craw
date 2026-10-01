@@ -17,6 +17,8 @@ export interface EmbeddingService {
 }
 
 export class DefaultEmbeddingService implements EmbeddingService {
+  private remoteDisabled: boolean = false;
+
   get apiKey(): string {
     return config.embeddingApiKey;
   }
@@ -30,11 +32,11 @@ export class DefaultEmbeddingService implements EmbeddingService {
   }
 
   getDimensions(): number {
-    return this.apiKey ? 1536 : 384;
+    return (!this.apiKey || this.remoteDisabled) ? 384 : 1536;
   }
 
   getModelName(): string {
-    return this.apiKey ? this.model : 'local-deterministic-384';
+    return (!this.apiKey || this.remoteDisabled) ? 'local-deterministic-384' : this.model;
   }
 
   /**
@@ -98,7 +100,7 @@ export class DefaultEmbeddingService implements EmbeddingService {
   async embedBatch(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
 
-    if (!this.apiKey) {
+    if (!this.apiKey || this.remoteDisabled) {
       return texts.map((t) => this.generateLocalEmbedding(t, this.getDimensions()));
     }
 
@@ -118,7 +120,10 @@ export class DefaultEmbeddingService implements EmbeddingService {
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.warn(`[EMBEDDING] Remote API error (${response.status}): ${errorText}. Falling back to local.`);
+        console.warn(`[EMBEDDING] Remote API returned status ${response.status}. Switching to local deterministic embeddings.`);
+        if (response.status === 404 || response.status === 400 || response.status === 401 || response.status === 403) {
+          this.remoteDisabled = true;
+        }
         return texts.map((t) => this.generateLocalEmbedding(t, 384));
       }
 
@@ -129,7 +134,8 @@ export class DefaultEmbeddingService implements EmbeddingService {
 
       return texts.map((t) => this.generateLocalEmbedding(t, 384));
     } catch (err: any) {
-      console.warn(`[EMBEDDING] Remote request failed: ${err.message}. Falling back to local.`);
+      console.warn(`[EMBEDDING] Remote request failed: ${err.message}. Switching to local deterministic embeddings.`);
+      this.remoteDisabled = true;
       return texts.map((t) => this.generateLocalEmbedding(t, 384));
     }
   }

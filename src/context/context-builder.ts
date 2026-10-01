@@ -165,11 +165,11 @@ export class ContextBuilder {
 
       case 'RANKING': {
         const targetMetric = plan.entities.metrics[0] || 'views';
-        const limit = plan.entities.limit || 5;
+        const isExplicitVideo = /\b(video|clip|bài đăng)\b/i.test(question);
         const isChannel =
-          plan.group_by === 'channel' ||
-          /\b(channel|kênh|creator)\b/i.test(question) ||
-          /\b(channel|kênh|creator)\b/i.test(plan.explanation);
+          !isExplicitVideo &&
+          !plan.entities.creator &&
+          (plan.group_by === 'channel' || /\b(channel|kênh|creator)\b/i.test(question));
 
         if (isChannel) {
           const topCreators = analyticsEngine.getTopCreators(

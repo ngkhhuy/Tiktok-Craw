@@ -4,6 +4,22 @@ import { buildCanonicalVideoUrl } from '../parser.js';
 import { logger } from '../../../utils/logger.js';
 
 export function extractRehydrationData(html: string): any | null {
+  // 0. Try api-data (modern TikTok mobile video SSR)
+  const apiDataMatch = html.match(/<script[^>]*id="api-data"[^>]*>([\s\S]*?)<\/script>/);
+  if (apiDataMatch) {
+    try {
+      const data = JSON.parse(apiDataMatch[1]);
+      if (data?.videoDetail?.itemInfo?.itemStruct) {
+        return {
+          '__DEFAULT_SCOPE__': {
+            'webapp.video-detail': data.videoDetail,
+          },
+          rawApiData: data,
+        };
+      }
+    } catch {}
+  }
+
   // 1. Try __UNIVERSAL_DATA_FOR_REHYDRATION__
   const universalMatch = html.match(/<script[^>]*id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/);
   if (universalMatch) {

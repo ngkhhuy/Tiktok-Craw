@@ -80,7 +80,8 @@ export class QueryPlanner {
     ) {
       intent = 'RANKING';
       const targetMetric = entities.metrics[0] || 'views';
-      const isChannel = /\b(channel|kênh|creator)\b/i.test(lower);
+      const isVideoExplicit = /\b(video|clip|bài đăng)\b/i.test(lower);
+      const isChannel = !isVideoExplicit && !entities.creator && /\b(channel|kênh|creator|tác giả)\b/i.test(lower);
       if (isChannel) {
         execution_steps.push(`Execute getTopCreators('${targetMetric}', ${entities.limit}, '${entities.order}')`);
         explanation = `Retrieve ${entities.order === 'DESC' ? 'top' : 'bottom'} ${entities.limit} channels by ${targetMetric}.`;
@@ -88,7 +89,7 @@ export class QueryPlanner {
         execution_steps.push(
           `Execute getTopVideos('${targetMetric}', ${entities.limit}, filters, '${entities.order}')`
         );
-        explanation = `Retrieve ${entities.order === 'DESC' ? 'top' : 'bottom'} ${entities.limit} videos by ${targetMetric}.`;
+        explanation = `Retrieve ${entities.order === 'DESC' ? 'top' : 'bottom'} ${entities.limit} videos by ${targetMetric}${entities.creator ? ` for creator @${entities.creator}` : ''}.`;
       }
     }
     // 5. Single Video Metric Lookup (when a specific single video ID is provided)
@@ -177,7 +178,12 @@ export class QueryPlanner {
             aggregation: defaultAgg,
           }));
 
-    const isChannelRanking = intent === 'RANKING' && /\b(channel|kênh|creator)\b/i.test(lower);
+    const isVideoExplicit = /\b(video|clip|bài đăng)\b/i.test(lower);
+    const isChannelRanking =
+      intent === 'RANKING' &&
+      !isVideoExplicit &&
+      !entities.creator &&
+      /\b(channel|kênh|creator|tác giả)\b/i.test(lower);
     const group_by = isChannelRanking ? 'channel' : null;
 
     return {

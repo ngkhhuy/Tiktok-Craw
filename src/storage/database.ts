@@ -925,7 +925,7 @@ export function rebuildIndex(): { videosIndexed: number; profilesIndexed: number
           // If this directory contains metadata.json, it's a video dir
           if (fs.existsSync(path.join(entryPath, 'metadata.json'))) {
             indexVideoDir(entryPath, entry.name);
-          } else if (depth < 3) {
+          } else if (depth < 6) {
             // Sharded subdirectory — recurse deeper
             scanRecursive(entryPath, depth + 1);
           }
@@ -975,7 +975,7 @@ export function rebuildIndex(): { videosIndexed: number; profilesIndexed: number
               const entryPath = path.join(dir, entry.name);
               if (fs.existsSync(path.join(entryPath, 'metadata.json'))) {
                 indexVideoDir(entryPath, entry.name, pEntry.name);
-              } else if (depth < 3) {
+              } else if (depth < 6) {
                 scanRecursive(entryPath, depth + 1);
               }
             }
@@ -1011,9 +1011,10 @@ export function ingestAllComments(): { commentsIngested: number; videosChecked: 
         videosChecked++;
         try {
           const comObj = JSON.parse(fs.readFileSync(commentsPath, 'utf-8'));
-          if (Array.isArray(comObj?.comments) && comObj.comments.length > 0) {
+          const commentsList = Array.isArray(comObj?.comments) ? comObj.comments : (Array.isArray(comObj) ? comObj : []);
+          if (commentsList.length > 0) {
             const videoId = entry.name;
-            const records: CommentRecord[] = comObj.comments.map((c: any) => ({
+            const records: CommentRecord[] = commentsList.map((c: any) => ({
               comment_id: c.comment_id,
               video_id: c.video_id || videoId,
               parent_comment_id: c.parent_comment_id && c.parent_comment_id !== '0' ? c.parent_comment_id : null,
@@ -1030,7 +1031,7 @@ export function ingestAllComments(): { commentsIngested: number; videosChecked: 
             commentsIngested += inserted;
           }
         } catch {}
-      } else if (depth < 4) {
+      } else if (depth < 8) {
         scanRecursive(entryPath, depth + 1);
       }
     }
