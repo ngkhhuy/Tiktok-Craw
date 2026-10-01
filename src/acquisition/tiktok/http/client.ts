@@ -102,7 +102,7 @@ export const httpClient = new TikTokHttpClient();
 
 // Comments can be paginated and slow. Keep their rate budget independent so
 // a long comment queue never delays video/profile metadata acquisition.
-export const commentsHttpClient = new TikTokHttpClient(config.requestDelayMs);
+export const commentsHttpClient = new TikTokHttpClient(config.commentRequestDelayMs);
 
 // Separate client for media CDN downloads (thumbnail, images)
 // with much lower rate limit since CDN servers are distributed and don't share rate limits with tiktok.com API

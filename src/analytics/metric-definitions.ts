@@ -14,6 +14,8 @@ export type SupportedMetric =
   | 'shares'
   | 'saves'
   | 'duration'
+  | 'videos'
+  | 'video_id'
   | 'like_rate'
   | 'comment_rate'
   | 'share_rate'
@@ -30,6 +32,42 @@ export type AggregationType =
   | 'PERCENTILE'
   | 'RANK'
   | 'RATIO';
+
+export interface MetricAggregationPlan {
+  field: SupportedMetric;
+  aggregation: AggregationType;
+}
+
+/**
+ * Checks whether a metric is a derived ratio/rate metric rather than a raw database column.
+ */
+export function isDerivedRateMetric(metric: SupportedMetric): boolean {
+  return ['like_rate', 'comment_rate', 'share_rate', 'save_rate', 'engagement_rate'].includes(metric);
+}
+
+/**
+ * Returns the exact mathematical formula representation for a derived rate metric.
+ */
+export function getRateMetricFormula(metric: SupportedMetric, agg: AggregationType = 'AVG'): string {
+  if (metric === 'share_rate') {
+    return agg === 'AVG' ? 'AVG(shares / views)' : 'SUM(shares) / SUM(views)';
+  }
+  if (metric === 'like_rate') {
+    return agg === 'AVG' ? 'AVG(likes / views)' : 'SUM(likes) / SUM(views)';
+  }
+  if (metric === 'comment_rate') {
+    return agg === 'AVG' ? 'AVG(comments / views)' : 'SUM(comments) / SUM(views)';
+  }
+  if (metric === 'save_rate') {
+    return agg === 'AVG' ? 'AVG(saves / views)' : 'SUM(saves) / SUM(views)';
+  }
+  if (metric === 'engagement_rate') {
+    return agg === 'AVG'
+      ? 'AVG((likes + comments + shares) / views)'
+      : 'SUM(likes + comments + shares) / SUM(views)';
+  }
+  return `${agg}(${metric})`;
+}
 
 export type ComparisonPopulation =
   | 'all_videos'

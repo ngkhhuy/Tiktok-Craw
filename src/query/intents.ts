@@ -29,8 +29,10 @@ export type QueryIntent =
 export interface ResolvedEntities {
   videoIds: string[];
   creator?: string;
+  creators?: string[];
   metrics: SupportedMetric[];
   aggregation?: AggregationType;
+  metricPlans?: MetricAggregationPlan[];
   filters: FilterCriteria;
   isRanking?: boolean;
   limit: number;
@@ -39,9 +41,23 @@ export interface ResolvedEntities {
   percentileTarget?: number;
 }
 
+export interface MetricAggregationPlan {
+  field: SupportedMetric;
+  aggregation: AggregationType;
+}
+
+export interface QueryPlanEntity {
+  type: 'CHANNEL' | 'VIDEO' | 'DATASET';
+  id: string;
+}
+
 export interface QueryPlan {
   intent: QueryIntent;
   entities: ResolvedEntities;
   execution_steps: string[];
   explanation: string;
+  entity?: QueryPlanEntity | null;
+  metrics?: MetricAggregationPlan[];
+  scope?: 'CHANNEL' | 'VIDEO' | 'DATASET';
+  group_by?: string | null;
 }

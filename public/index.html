@@ -69,6 +69,16 @@
         </svg>
         <span>Kho Video & Trích Xuất</span>
       </button>
+      <button class="main-tab-btn" id="btnTabProfiles" data-tab="profiles">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+          <circle cx="9" cy="7" r="4"></circle>
+          <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+          <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+        </svg>
+        <span>Danh Sách Kênh (Profiles)</span>
+        <span class="tab-badge-new" id="tabProfilesBadge">0 kênh</span>
+      </button>
       <button class="main-tab-btn" id="btnTabAnalytics" data-tab="analytics">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
@@ -270,13 +280,65 @@
 
     <!-- Main Content Grid -->
     <main class="content-area">
+      <!-- Channel Detail Banner (Hiển thị khi đang xem danh sách video của 1 kênh cụ thể) -->
+      <div class="channel-detail-banner hidden" id="channelDetailBanner">
+        <div class="channel-banner-main">
+          <button class="btn-back-profiles" id="btnBackToProfiles" title="Quay lại danh sách kênh">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5">
+              <line x1="19" y1="12" x2="5" y2="12"></line>
+              <polyline points="12 19 5 12 12 5"></polyline>
+            </svg>
+            <span>Tất cả Profiles</span>
+          </button>
+          <div class="channel-banner-profile">
+            <img src="" alt="Avatar" class="channel-banner-avatar" id="channelBannerAvatar">
+            <div class="channel-banner-text">
+              <div class="channel-banner-name-wrap">
+                <h3 id="channelBannerName">Tên Kênh</h3>
+                <span class="channel-banner-handle" id="channelBannerUser">@username</span>
+                <a href="#" target="_blank" rel="noopener noreferrer" class="channel-banner-link" id="channelBannerLink">TikTok ↗</a>
+              </div>
+              <p class="channel-banner-bio" id="channelBannerBio"></p>
+            </div>
+          </div>
+        </div>
+        <div class="channel-banner-stats">
+          <div class="cb-stat-pill">
+            <span class="cb-stat-label">Video đã cào:</span>
+            <span class="cb-stat-val" id="cbVideos">0</span>
+          </div>
+          <div class="cb-stat-pill">
+            <span class="cb-stat-label">Tổng lượt xem:</span>
+            <span class="cb-stat-val" id="cbViews">0</span>
+          </div>
+          <div class="cb-stat-pill">
+            <span class="cb-stat-label">Tổng lượt tim:</span>
+            <span class="cb-stat-val" id="cbLikes">0</span>
+          </div>
+          <div class="cb-stat-pill">
+            <span class="cb-stat-label">Bình luận:</span>
+            <span class="cb-stat-val" id="cbComments">0</span>
+          </div>
+          <div class="cb-stat-pill">
+            <span class="cb-stat-label">Dung lượng:</span>
+            <span class="cb-stat-val" id="cbSize">0 MB</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Profiles Grid (Hiển thị danh sách các kênh khi click vào Profiles) -->
+      <div class="profiles-grid hidden" id="profilesGrid">
+        <!-- Rendered dynamically by JS -->
+      </div>
+
+      <!-- Video Grid (Hiển thị video) -->
       <div class="video-grid" id="videoGrid">
         <!-- Rendered dynamically by JS -->
       </div>
       <div class="empty-state hidden" id="emptyState">
         <div class="empty-icon">📂</div>
-        <h3>Không tìm thấy video nào</h3>
-        <p>Thử nhập từ khóa khác hoặc cào thêm video mới bằng CLI.</p>
+        <h3 id="emptyTitle">Không tìm thấy video nào</h3>
+        <p id="emptyDesc">Thử nhập từ khóa khác hoặc cào thêm video mới bằng CLI.</p>
       </div>
     </main>
   </div>

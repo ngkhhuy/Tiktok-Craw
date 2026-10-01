@@ -601,6 +601,7 @@ export interface VideosQueryOptions {
   sort?: 'newest' | 'oldest' | 'views' | 'likes' | 'size';
   search?: string;
   profileId?: string;
+  username?: string;
   status?: string;
 }
 
@@ -618,7 +619,7 @@ export interface VideosQueryResult {
 export function queryVideos(options: VideosQueryOptions = {}): VideosQueryResult {
   const db = getDb();
   const page = Math.max(1, options.page || 1);
-  const limit = Math.min(200, Math.max(1, options.limit || 50));
+  const limit = options.limit && options.limit > 0 ? Math.min(5000, options.limit) : 50;
   const offset = (page - 1) * limit;
 
   const conditions: string[] = [];
@@ -632,9 +633,16 @@ export function queryVideos(options: VideosQueryOptions = {}): VideosQueryResult
     conditions.push("status = 'completed'");
   }
 
-  if (options.profileId) {
-    conditions.push('profile_id = @filterProfileId');
+  if (options.profileId && options.username) {
+    conditions.push('(profile_id = @filterProfileId OR username = @filterUsername OR username = @filterProfileId)');
     params.filterProfileId = options.profileId;
+    params.filterUsername = options.username;
+  } else if (options.profileId) {
+    conditions.push('(profile_id = @filterProfileId OR username = @filterProfileId)');
+    params.filterProfileId = options.profileId;
+  } else if (options.username) {
+    conditions.push('(username = @filterUsername OR profile_id = @filterUsername)');
+    params.filterUsername = options.username;
   }
 
   if (options.search) {
@@ -1035,9 +1043,132 @@ export function ingestAllComments(): { commentsIngested: number; videosChecked: 
   return { commentsIngested, videosChecked };
 }
 
+export interface ProfileSummary {
+  profileId: string;
+  username: string;
+  displayName: string;
+  avatarUrl: string;
+  bio: string;
+  profileUrl: string;
+  followers: number;
+  tiktokLikes: number;
+  tiktokVideos: number;
+  localVideos: number;
+  totalViews: number;
+  totalLikes: number;
+  totalComments: number;
+  totalSize: number;
+  lastUpdated: string | null;
+}
+
+export function getProfilesSummary(): ProfileSummary[] {
+  const db = getDb();
+  const profilesDir = path.resolve(config.dataDir, 'profiles');
+  const map = new Map<string, ProfileSummary>();
+
+  if (fs.existsSync(profilesDir)) {
+    try {
+      const dirs = fs.readdirSync(profilesDir);
+      for (const d of dirs) {
+        const pJson = path.join(profilesDir, d, 'profile.json');
+        if (fs.existsSync(pJson)) {
+          try {
+            const raw = JSON.parse(fs.readFileSync(pJson, 'utf-8'));
+            const pId = String(raw.profile_id || d);
+            map.set(pId, {
+              profileId: pId,
+              username: raw.username || '',
+              displayName: raw.display_name || raw.username || '',
+              avatarUrl: raw.avatar_url || '',
+              bio: raw.bio || '',
+              profileUrl: raw.profile_url || `https://www.tiktok.com/@${raw.username}`,
+              followers: Number(raw.stats?.followers || 0),
+              tiktokLikes: Number(raw.stats?.likes || 0),
+              tiktokVideos: Number(raw.stats?.videos || 0),
+              localVideos: 0,
+              totalViews: 0,
+              totalLikes: 0,
+              totalComments: 0,
+              totalSize: 0,
+              lastUpdated: null,
+            });
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+
+  for (const [pId, p] of map.entries()) {
+    const stats: any = db.prepare(`
+      SELECT 
+        count(*) as count,
+        COALESCE(sum(views), 0) as total_views,
+        COALESCE(sum(likes), 0) as total_likes,
+        COALESCE(sum(comments_count), 0) as total_comments,
+        COALESCE(sum(file_size), 0) as total_size,
+        max(updated_at) as last_updated
+      FROM videos 
+      WHERE (profile_id = ? OR username = ?) AND status = 'completed'
+    `).get(pId, p.username);
+    if (stats) {
+      p.localVideos = Number(stats.count || 0);
+      p.totalViews = Number(stats.total_views || 0);
+      p.totalLikes = Number(stats.total_likes || 0);
+      p.totalComments = Number(stats.total_comments || 0);
+      p.totalSize = Number(stats.total_size || 0);
+      p.lastUpdated = stats.last_updated || null;
+    }
+  }
+
+  // Also check distinct creators from SQLite that may not have profile.json
+  const dbAuthors: any[] = db.prepare(`
+    SELECT DISTINCT username, profile_id, display_name, avatar_url, count(*) as count,
+           COALESCE(sum(views), 0) as total_views,
+           COALESCE(sum(likes), 0) as total_likes,
+           COALESCE(sum(comments_count), 0) as total_comments,
+           COALESCE(sum(file_size), 0) as total_size,
+           max(updated_at) as last_updated
+    FROM videos
+    WHERE status = 'completed' AND username IS NOT NULL AND username != ''
+    GROUP BY username
+  `).all();
+
+  for (const row of dbAuthors) {
+    let exists = false;
+    for (const p of map.values()) {
+      if (p.username.toLowerCase() === String(row.username).toLowerCase() || (row.profile_id && p.profileId === String(row.profile_id))) {
+        exists = true;
+        break;
+      }
+    }
+    if (!exists && row.username) {
+      map.set(row.profile_id || row.username, {
+        profileId: String(row.profile_id || row.username),
+        username: row.username,
+        displayName: row.display_name || row.username,
+        avatarUrl: row.avatar_url || '',
+        bio: '',
+        profileUrl: `https://www.tiktok.com/@${row.username}`,
+        followers: 0,
+        tiktokLikes: 0,
+        tiktokVideos: Number(row.count || 0),
+        localVideos: Number(row.count || 0),
+        totalViews: Number(row.total_views || 0),
+        totalLikes: Number(row.total_likes || 0),
+        totalComments: Number(row.total_comments || 0),
+        totalSize: Number(row.total_size || 0),
+        lastUpdated: row.last_updated || null,
+      });
+    }
+  }
+
+  return Array.from(map.values()).sort((a, b) => b.localVideos - a.localVideos || b.followers - a.followers);
+}
+
 export function closeDb(): void {
   if (_db) {
     _db.close();
     _db = null;
   }
 }
+

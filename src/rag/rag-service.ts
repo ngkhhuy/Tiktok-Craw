@@ -16,6 +16,7 @@ import { conversationManager } from '../conversation/conversation-manager.js';
 import { llmClient } from '../llm/llm-client.js';
 import { QueryPlan } from '../query/intents.js';
 import { queryPlanner } from '../query/query-planner.js';
+export { SWAYSEEK_SYSTEM_PROMPT } from './prompts.js';
 
 export interface RAGQueryResult {
   answer: string;

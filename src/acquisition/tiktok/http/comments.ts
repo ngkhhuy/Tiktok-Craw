@@ -63,7 +63,8 @@ export async function fetchCommentsHttp(
       seenCursors.add(cursor);
       page++;
 
-      const apiUrl = `https://www.tiktok.com/api/comment/list/?aid=1988&aweme_id=${videoId}&count=20&cursor=${cursor}`;
+      const pageSize = 50;
+      const apiUrl = `https://www.tiktok.com/api/comment/list/?aid=1988&aweme_id=${videoId}&count=${pageSize}&cursor=${cursor}`;
       const res = await commentsHttpClient.get(apiUrl, {
         headers: {
           'Referer': videoUrl,
@@ -89,6 +90,8 @@ export async function fetchCommentsHttp(
         break;
       }
 
+      const commentsWithReplies: Array<{ cid: string }> = [];
+
       for (const raw of rawComments) {
         if (comments.length >= maxComments) break;
         const normalized = normalizeComment(raw, videoId, null);
@@ -97,26 +100,39 @@ export async function fetchCommentsHttp(
           comments.push(normalized);
         }
 
-        // Fetch replies if available and reply_comment_total > 0
         const replyTotal = Number(raw.reply_comment_total || 0);
-        if (replyTotal > 0 && comments.length < maxComments) {
+        if (replyTotal > 0) {
+          commentsWithReplies.push({ cid: normalized.comment_id });
+        }
+      }
+
+      // Fetch replies in parallel for this batch to eliminate sequential network latency
+      if (commentsWithReplies.length > 0 && comments.length < maxComments) {
+        const replyTasks = commentsWithReplies.map(async ({ cid }) => {
           try {
-            const replies = await fetchCommentRepliesHttp(videoId, normalized.comment_id, videoUrl);
-            for (const reply of replies) {
+            return await fetchCommentRepliesHttp(videoId, cid, videoUrl);
+          } catch (e: any) {
+            logger.debug(`Could not fetch replies for comment ${cid}: ${e.message}`);
+            return [];
+          }
+        });
+
+        const replyResults = await Promise.allSettled(replyTasks);
+        for (const resItem of replyResults) {
+          if (resItem.status === 'fulfilled' && Array.isArray(resItem.value)) {
+            for (const reply of resItem.value) {
               if (comments.length >= maxComments) break;
               if (!seenCommentIds.has(reply.comment_id)) {
                 seenCommentIds.add(reply.comment_id);
                 comments.push(reply);
               }
             }
-          } catch (e: any) {
-            logger.debug(`Could not fetch replies for comment ${normalized.comment_id}: ${e.message}`);
           }
         }
       }
 
       hasMore = Boolean(json.has_more);
-      cursor = json.cursor ?? (cursor as number + 20);
+      cursor = json.cursor ?? (typeof cursor === 'number' ? cursor + pageSize : cursor);
     }
 
     logger.stage('comments', `Fetched ${comments.length} comments for video ${videoId}`);
@@ -141,7 +157,7 @@ export async function fetchCommentRepliesHttp(
   commentId: string,
   videoUrl: string
 ): Promise<NormalizedTikTokComment[]> {
-  const replyUrl = `https://www.tiktok.com/api/comment/list/reply/?aid=1988&item_id=${videoId}&comment_id=${commentId}&count=20&cursor=0`;
+  const replyUrl = `https://www.tiktok.com/api/comment/list/reply/?aid=1988&item_id=${videoId}&comment_id=${commentId}&count=50&cursor=0`;
   const res = await commentsHttpClient.get(replyUrl, {
     headers: {
       'Referer': videoUrl,

@@ -8,7 +8,7 @@ import { tiktokAcquisition } from '../acquisition/tiktok/index.js';
 import { profileCrawler } from '../crawler/profile-crawler.js';
 import { videoCrawler } from '../crawler/video-crawler.js';
 import { localStorage } from '../storage/local-storage.js';
-import { queryVideos, getVideoById, getVideoStats, rebuildIndex } from '../storage/database.js';
+import { queryVideos, getVideoById, getVideoStats, rebuildIndex, getProfilesSummary } from '../storage/database.js';
 import { ragService } from '../rag/rag-service.js';
 import { conversationManager } from '../conversation/conversation-manager.js';
 import { getPopulationBaseline } from '../analytics/baseline.js';
@@ -133,6 +133,7 @@ export function scanAllVideos(options: {
   sort?: 'newest' | 'oldest' | 'views' | 'likes' | 'size';
   search?: string;
   profileId?: string;
+  username?: string;
 } = {}): {
   items: VideoItemSummary[];
   totalCount: number;
@@ -143,10 +144,11 @@ export function scanAllVideos(options: {
 } {
   const result = queryVideos({
     page: options.page || 1,
-    limit: options.limit || 100,
+    limit: options.limit || 5000,
     sort: options.sort,
     search: options.search,
     profileId: options.profileId,
+    username: options.username,
   });
 
   const items: VideoItemSummary[] = result.videos.map((v) => ({
@@ -483,6 +485,7 @@ export function createServer(port: number = 3000) {
       const sort = (parsedUrl.searchParams.get('sort') || undefined) as any;
       const search = parsedUrl.searchParams.get('search') || undefined;
       const profileId = parsedUrl.searchParams.get('profileId') || undefined;
+      const username = parsedUrl.searchParams.get('username') || undefined;
 
       const { items, totalCount, totalSize, totalComments, page: curPage, totalPages } = scanAllVideos({
         page,
@@ -490,6 +493,7 @@ export function createServer(port: number = 3000) {
         sort,
         search,
         profileId,
+        username,
       });
 
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -501,6 +505,19 @@ export function createServer(port: number = 3000) {
         page: curPage,
         totalPages,
       }));
+      return;
+    }
+
+    // 1.05 API: /api/profiles (List all crawled profiles with metadata and local dataset stats)
+    if (pathname === '/api/profiles') {
+      try {
+        const profiles = getProfilesSummary();
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ profiles }));
+      } catch (err: any) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ error: err.message || 'Lỗi khi tải danh sách profile' }));
+      }
       return;
     }
 

@@ -8,6 +8,7 @@
  */
 
 import { getDb } from '../storage/database.js';
+import { normalizeCreatorHandle } from '../query/entity-resolver.js';
 import {
   calculateMedian,
   calculatePercentile,
@@ -57,7 +58,7 @@ export function getPopulationBaseline(
   const params: any[] = [];
 
   if (population.startsWith('creator:')) {
-    const creator = population.replace('creator:', '');
+    const creator = normalizeCreatorHandle(population.replace('creator:', ''));
     sql += ` AND username = ?`;
     params.push(creator);
   } else if (population === 'duration:short') {
@@ -77,6 +78,8 @@ export function getPopulationBaseline(
     shares: [],
     saves: [],
     duration: [],
+    videos: [],
+    video_id: [],
     like_rate: [],
     comment_rate: [],
     share_rate: [],

@@ -7,8 +7,9 @@
  * - "The query planner never queries the database blindly or relies on external LLM for math"
  */
 
-import { ContextHistory, entityResolver } from './entity-resolver.js';
-import { QueryIntent, QueryPlan } from './intents.js';
+import { ContextHistory, entityResolver, normalizeEntityIdentifier } from './entity-resolver.js';
+import { MetricAggregationPlan, QueryIntent, QueryPlan } from './intents.js';
+import { getRateMetricFormula } from '../analytics/metric-definitions.js';
 
 export class QueryPlanner {
   plan(query: string, context?: ContextHistory): QueryPlan {
@@ -31,9 +32,13 @@ export class QueryPlanner {
       explanation = 'Overview of total videos, profiles, comments, and views in database.';
     }
     // 2. Correlation Queries
+    // STRICT RULE: Only classify as CORRELATION when user genuinely asks about correlation, relationships, or causation.
+    // NEVER deduce: 2 metrics → CORRELATION!
     else if (
-      /(tương quan|ảnh hưởng|càng .* càng|dài hơn .* view hơn|liên quan giữa|có mối liên hệ|có liên hệ)/i.test(lower) ||
-      (entities.metrics.length >= 2 && /(và|với|liên hệ|ảnh hưởng)/i.test(lower) && !entities.videoIds.length)
+      /(tương quan|correlation|relationship|mối quan hệ|mức độ liên hệ|có liên quan|liên quan giữa|ảnh hưởng đến|càng .* càng|dài hơn .* view hơn)/i.test(
+        lower
+      ) ||
+      (/(liên quan|liên hệ)/i.test(lower) && /(không|khong|\?)/i.test(lower))
     ) {
       intent = 'CORRELATION';
       const metricX = entities.metrics[0] || 'duration';
@@ -42,14 +47,19 @@ export class QueryPlanner {
       execution_steps.push('Attach statistical caveats: correlation is not causation');
       explanation = `Statistical correlation analysis between ${metricX} and ${metricY}.`;
     }
-    // 3. Comparison Queries (2 video IDs or comparison wording)
+    // 3. Comparison Queries (2 creators, 2 video IDs, or comparison wording)
     else if (
       entities.videoIds.length >= 2 ||
-      (/(so sánh|khác nhau|hơn hay kém|ai cao hơn|video nào tốt hơn)/i.test(lower) &&
-        (entities.videoIds.length === 1 || entities.creator))
+      (entities.creators && entities.creators.length >= 2) ||
+      (/\b(so sánh|khác nhau|hơn hay kém|ai cao hơn|video nào tốt hơn|nhiều hơn|ít hơn|cao hơn|thấp hơn|hơn không)\b/i.test(lower) &&
+        (entities.videoIds.length >= 1 || (entities.creators && entities.creators.length >= 1) || entities.creator))
     ) {
       intent = 'COMPARISON';
-      if (entities.videoIds.length >= 2) {
+      if (entities.creators && entities.creators.length >= 2) {
+        execution_steps.push(
+          `Execute deterministic compareCreators('${entities.creators[0]}', '${entities.creators[1]}')`
+        );
+      } else if (entities.videoIds.length >= 2) {
         execution_steps.push(
           `Execute deterministic compareVideos('${entities.videoIds[0]}', '${entities.videoIds[1]}')`
         );
@@ -62,7 +72,26 @@ export class QueryPlanner {
       }
       explanation = 'Side-by-side deterministic comparison with absolute and relative differences.';
     }
-    // 4. Single Video Metric Lookup
+    // 4. Ranking Queries (Top / Bottom, video nhiều nhất/ít nhất, danh sách xếp hạng, channel nào có nhiều views nhất)
+    else if (
+      entities.isRanking ||
+      /\b(top|bottom|video nào|những video|danh sách video|kênh nào|channel nào|creator nào)\b/i.test(lower) ||
+      /\b(nhiều|ít|cao|thấp)\s+\S+\s+nhất\b/i.test(lower)
+    ) {
+      intent = 'RANKING';
+      const targetMetric = entities.metrics[0] || 'views';
+      const isChannel = /\b(channel|kênh|creator)\b/i.test(lower);
+      if (isChannel) {
+        execution_steps.push(`Execute getTopCreators('${targetMetric}', ${entities.limit}, '${entities.order}')`);
+        explanation = `Retrieve ${entities.order === 'DESC' ? 'top' : 'bottom'} ${entities.limit} channels by ${targetMetric}.`;
+      } else {
+        execution_steps.push(
+          `Execute getTopVideos('${targetMetric}', ${entities.limit}, filters, '${entities.order}')`
+        );
+        explanation = `Retrieve ${entities.order === 'DESC' ? 'top' : 'bottom'} ${entities.limit} videos by ${targetMetric}.`;
+      }
+    }
+    // 5. Single Video Metric Lookup (when a specific single video ID is provided)
     else if (entities.videoIds.length === 1 && !/(bình luận|comment|nói gì|khen|chê|phản hồi)/i.test(lower)) {
       intent = 'METRIC_LOOKUP';
       execution_steps.push(`Fetch record for video '${entities.videoIds[0]}' from videos table`);
@@ -70,34 +99,36 @@ export class QueryPlanner {
       execution_steps.push('Calculate rank and percentile against dataset and creator baselines');
       explanation = `Deterministic metric lookup for video ${entities.videoIds[0]}.`;
     }
-    // 5. Creator Performance Analysis
-    else if (entities.creator && /(hiệu suất|kênh|tổng quan kênh|phát triển|đánh giá|thành tích)/i.test(lower)) {
+    // 6. Creator Performance Qualitative Analysis (e.g. "đánh giá kênh", "hiệu suất kênh")
+    else if (entities.creator && /(hiệu suất|tổng quan kênh|phát triển|đánh giá|thành tích)/i.test(lower)) {
       intent = 'CREATOR_ANALYSIS';
       execution_steps.push(`Compute baseline benchmark for creator '@${entities.creator}'`);
       execution_steps.push(`Compare creator metrics to overall dataset baseline`);
       execution_steps.push(`Fetch top 3 videos of creator '@${entities.creator}'`);
       explanation = `Creator performance analysis for @${entities.creator}.`;
     }
-    // 6. Ranking Queries (Top / Bottom, video nhiều nhất/ít nhất, danh sách xếp hạng)
+    // 7. Aggregation Queries (SUM, AVG, MEDIAN, MIN, MAX, COUNT, multi-metric queries, percentage of global)
     else if (
-      entities.isRanking ||
-      /\b(top|bottom|video nào|những video|danh sách video|video có .* nhất|video nhiều .* nhất|video ít .* nhất)\b/i.test(lower)
+      entities.aggregation ||
+      entities.creator ||
+      /(?:bao nhiêu|có bao nhiêu|tổng|tổng cộng|trung bình|chiếm bao nhiêu\s*%|chiếm bao nhiêu phần trăm|%\s*tổng|phần trăm tổng)/i.test(lower)
     ) {
-      intent = 'RANKING';
-      const targetMetric = entities.metrics[0] || 'views';
-      execution_steps.push(
-        `Execute getTopVideos('${targetMetric}', ${entities.limit}, filters, '${entities.order}')`
-      );
-      explanation = `Retrieve ${entities.order === 'DESC' ? 'top' : 'bottom'} ${entities.limit} videos by ${targetMetric}.`;
-    }
-    // 7. Aggregation Queries (SUM, AVG, MEDIAN, MIN, MAX, COUNT)
-    else if (entities.aggregation) {
       intent = 'AGGREGATION';
-      const targetMetric = entities.metrics[0] || 'views';
-      execution_steps.push(
-        `Execute deterministic getAggregate('${targetMetric}', '${entities.aggregation}', filters)`
-      );
-      explanation = `Calculate ${entities.aggregation} of ${targetMetric} across matched videos.`;
+      const plans =
+        entities.metricPlans && entities.metricPlans.length > 0
+          ? entities.metricPlans
+          : entities.metrics.map((m) => ({ field: m, aggregation: entities.aggregation || 'SUM' }));
+
+      for (const p of plans) {
+        if (p.aggregation === 'RATIO' || /(?:chiếm bao nhiêu\s*%|chiếm bao nhiêu phần trăm|%\s*tổng|phần trăm tổng)/i.test(lower)) {
+          execution_steps.push(
+            `Execute deterministic getChannelShareOfDataset('${entities.creator}', '${p.field}', 'SUM')`
+          );
+        } else {
+          execution_steps.push(`Execute deterministic getAggregate('${p.field}', '${p.aggregation}', filters)`);
+        }
+      }
+      explanation = `Calculate exact requested metrics [${plans.map((p) => getRateMetricFormula(p.field, p.aggregation)).join(', ')}] across ${entities.creator ? `channel @${entities.creator}` : 'matched videos'}.`;
     }
     // 8. Hybrid (both metrics and comments requested)
     else if (
@@ -119,8 +150,42 @@ export class QueryPlanner {
       explanation = `Semantic search across comments and captions for evidence matching query.`;
     }
 
+    const scope: 'CHANNEL' | 'VIDEO' | 'DATASET' = entities.videoIds.length > 0
+      ? 'VIDEO'
+      : entities.creator
+      ? 'CHANNEL'
+      : 'DATASET';
+
+    const entity: QueryPlan['entity'] = entities.videoIds.length > 0
+      ? {
+          type: 'VIDEO',
+          id: entities.videoIds[0],
+        }
+      : entities.creator
+      ? {
+          type: 'CHANNEL',
+          id: normalizeEntityIdentifier(entities.creator),
+        }
+      : null;
+
+    const defaultAgg = entities.aggregation || 'SUM';
+    const metrics: MetricAggregationPlan[] =
+      entities.metricPlans && entities.metricPlans.length > 0
+        ? entities.metricPlans
+        : entities.metrics.map((field) => ({
+            field,
+            aggregation: defaultAgg,
+          }));
+
+    const isChannelRanking = intent === 'RANKING' && /\b(channel|kênh|creator)\b/i.test(lower);
+    const group_by = isChannelRanking ? 'channel' : null;
+
     return {
       intent,
+      entity,
+      metrics,
+      scope,
+      group_by,
       entities,
       execution_steps,
       explanation,

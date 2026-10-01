@@ -20,10 +20,12 @@ import {
   calculateRates,
   calculateRatio,
   FilterCriteria,
+  MetricAggregationPlan,
   MetricRates,
   SupportedMetric,
 } from './metric-definitions.js';
 import { getPopulationBaseline } from './baseline.js';
+import { normalizeCreatorHandle } from '../query/entity-resolver.js';
 
 export interface VideoAnalyticsDetails {
   video_id: string;
@@ -112,7 +114,7 @@ export class AnalyticsEngine {
 
     if (filters.creator) {
       conditions.push('username = ?');
-      params.push(filters.creator.replace(/^@/, ''));
+      params.push(normalizeCreatorHandle(filters.creator));
     }
     if (filters.startDate) {
       conditions.push('published_at >= ?');
@@ -335,13 +337,35 @@ export class AnalyticsEngine {
       if (agg === 'PERCENTILE') {
         return { value: calculatePercentile(values, percentileTarget), count: values.length, metric, agg, top_video };
       }
+      if (isRateMetric && (agg === 'SUM' || agg === 'RATIO')) {
+        let totalNum = 0;
+        let totalDenom = 0;
+        for (const r of rows) {
+          const v = Number(r.views) || 0;
+          totalDenom += v;
+          if (metric === 'share_rate') totalNum += Number(r.shares) || 0;
+          else if (metric === 'like_rate') totalNum += Number(r.likes) || 0;
+          else if (metric === 'comment_rate') totalNum += Number(r.comments_count) || 0;
+          else if (metric === 'save_rate') totalNum += Number(r.saves) || 0;
+          else if (metric === 'engagement_rate') totalNum += (Number(r.likes) || 0) + (Number(r.comments_count) || 0) + (Number(r.shares) || 0);
+        }
+        const aggregateRate = totalDenom > 0 ? totalNum / totalDenom : null;
+        return {
+          value: aggregateRate !== null ? Number(aggregateRate.toFixed(6)) : null,
+          count: rows.length,
+          metric,
+          agg,
+          top_video,
+        };
+      }
+
       if (agg === 'SUM') {
         const sum = values.reduce((a, b) => a + b, 0);
         return { value: Number(sum.toFixed(4)), count: values.length, metric, agg, top_video };
       }
       if (agg === 'AVG') {
         const avg = values.reduce((a, b) => a + b, 0) / values.length;
-        return { value: Number(avg.toFixed(4)), count: values.length, metric, agg, top_video };
+        return { value: Number(avg.toFixed(isRateMetric ? 6 : 4)), count: values.length, metric, agg, top_video };
       }
       if (agg === 'MIN') {
         return { value: Math.min(...values), count: values.length, metric, agg, top_video };
@@ -359,6 +383,8 @@ export class AnalyticsEngine {
       shares: 'shares',
       saves: 'saves',
       duration: 'duration',
+      videos: 'video_id',
+      video_id: 'video_id',
     };
     const col = colMap[metric] || 'views';
 
@@ -551,7 +577,7 @@ export class AnalyticsEngine {
     dataset_median_engagement: number;
     engagement_percent_diff: number | null;
   } {
-    const cleanUser = username.replace(/^@/, '');
+    const cleanUser = normalizeCreatorHandle(username);
     const creatorBaseline = getPopulationBaseline(`creator:${cleanUser}`);
     const datasetBaseline = getPopulationBaseline('all_videos');
 
@@ -574,6 +600,245 @@ export class AnalyticsEngine {
       dataset_median_engagement: dEng,
       engagement_percent_diff: engDiff.percent_change,
     };
+  }
+
+  /**
+   * Compares two creators side-by-side using deterministic metrics and differences.
+   * If metricsToCompare is specified, calculates the exact requested operations (e.g. SUM, AVG)
+   * instead of defaulting to medians.
+   */
+  compareCreators(
+    creatorA: string,
+    creatorB: string,
+    metricsToCompare?: MetricAggregationPlan[]
+  ): {
+    creator_a: {
+      username: string;
+      total_videos: number;
+      median_views: number;
+      mean_views: number;
+      median_likes: number;
+      median_engagement: number;
+      aggregated_metrics?: Record<string, { aggregation: string; value: number | null }>;
+    };
+    creator_b: {
+      username: string;
+      total_videos: number;
+      median_views: number;
+      mean_views: number;
+      median_likes: number;
+      median_engagement: number;
+      aggregated_metrics?: Record<string, { aggregation: string; value: number | null }>;
+    };
+    comparison_rows?: {
+      metric: SupportedMetric;
+      aggregation: AggregationType;
+      value_a: number | null;
+      value_b: number | null;
+      diff: number | null;
+      percent_diff: number | null;
+      higher: string;
+    }[];
+    differences: {
+      views_diff: any;
+      likes_diff: any;
+      engagement_diff: any;
+      [key: string]: any;
+    };
+    summary: string;
+  } {
+    const userA = normalizeCreatorHandle(creatorA);
+    const userB = normalizeCreatorHandle(creatorB);
+    const baselineA = getPopulationBaseline(`creator:${userA}`);
+    const baselineB = getPopulationBaseline(`creator:${userB}`);
+
+    const viewsDiff = calculateDifference(baselineA.metrics.views.median, baselineB.metrics.views.median);
+    const likesDiff = calculateDifference(baselineA.metrics.likes.median, baselineB.metrics.likes.median);
+    const engDiff = calculateDifference(baselineA.metrics.engagement_rate.median, baselineB.metrics.engagement_rate.median);
+
+    const aggregatedA: Record<string, { aggregation: string; value: number | null }> = {};
+    const aggregatedB: Record<string, { aggregation: string; value: number | null }> = {};
+    const comparison_rows: {
+      metric: SupportedMetric;
+      aggregation: AggregationType;
+      value_a: number | null;
+      value_b: number | null;
+      diff: number | null;
+      percent_diff: number | null;
+      higher: string;
+    }[] = [];
+
+    const customDiffs: {
+      views_diff: any;
+      likes_diff: any;
+      engagement_diff: any;
+      [key: string]: any;
+    } = {
+      views_diff: viewsDiff,
+      likes_diff: likesDiff,
+      engagement_diff: engDiff,
+    };
+
+    let summary = '';
+
+    if (metricsToCompare && metricsToCompare.length > 0) {
+      for (const m of metricsToCompare) {
+        const resA = this.getAggregate(m.field, m.aggregation, { creator: userA });
+        const resB = this.getAggregate(m.field, m.aggregation, { creator: userB });
+
+        const valA = resA.value;
+        const valB = resB.value;
+        const d = calculateDifference(valA, valB);
+        const higher =
+          valA !== null && valB !== null
+            ? valA > valB
+              ? `@${userA}`
+              : valB > valA
+              ? `@${userB}`
+              : 'bằng nhau'
+            : 'N/A';
+
+        aggregatedA[m.field] = { aggregation: m.aggregation, value: valA };
+        aggregatedB[m.field] = { aggregation: m.aggregation, value: valB };
+
+        comparison_rows.push({
+          metric: m.field,
+          aggregation: m.aggregation,
+          value_a: valA,
+          value_b: valB,
+          diff: d.diff,
+          percent_diff: d.percent_change,
+          higher,
+        });
+
+        customDiffs[`${m.field}_${m.aggregation.toLowerCase()}_diff`] = d;
+      }
+
+      summary =
+        `So sánh giữa @${userA} và @${userB}: ` +
+        comparison_rows
+          .map(
+            (r) =>
+              `${r.metric} [${r.aggregation}]: @${userA}=${r.value_a?.toLocaleString() ?? 'N/A'}, @${userB}=${r.value_b?.toLocaleString() ?? 'N/A'} (${r.higher} cao hơn)`
+          )
+          .join('; ');
+    } else {
+      const higherViews =
+        baselineA.metrics.views.median > baselineB.metrics.views.median
+          ? `@${userA}`
+          : baselineB.metrics.views.median > baselineA.metrics.views.median
+          ? `@${userB}`
+          : 'bằng nhau';
+      summary = `Kênh ${higherViews} có median views cao hơn giữa @${userA} và @${userB}.`;
+    }
+
+    return {
+      creator_a: {
+        username: userA,
+        total_videos: baselineA.total_videos,
+        median_views: baselineA.metrics.views.median,
+        mean_views: baselineA.metrics.views.mean,
+        median_likes: baselineA.metrics.likes.median,
+        median_engagement: baselineA.metrics.engagement_rate.median,
+        aggregated_metrics: aggregatedA,
+      },
+      creator_b: {
+        username: userB,
+        total_videos: baselineB.total_videos,
+        median_views: baselineB.metrics.views.median,
+        mean_views: baselineB.metrics.views.mean,
+        median_likes: baselineB.metrics.likes.median,
+        median_engagement: baselineB.metrics.engagement_rate.median,
+        aggregated_metrics: aggregatedB,
+      },
+      comparison_rows,
+      differences: customDiffs,
+      summary,
+    };
+  }
+
+  /**
+   * Computes the channel's share / percentage of the global dataset for a given metric.
+   * e.g., SUM(views WHERE channel = @khoailangthang) / SUM(views WHERE all channels) * 100
+   */
+  getChannelShareOfDataset(
+    username: string,
+    metric: SupportedMetric = 'views',
+    aggregation: 'SUM' | 'COUNT' = 'SUM'
+  ): {
+    channel: string;
+    metric: SupportedMetric;
+    aggregation: string;
+    channel_value: number;
+    dataset_value: number;
+    percentage: number;
+    total_videos_channel: number;
+    total_videos_dataset: number;
+    summary: string;
+  } {
+    const cleanUser = normalizeCreatorHandle(username);
+    const channelRes = this.getAggregate(metric, aggregation, { creator: cleanUser });
+    const datasetRes = this.getAggregate(metric, aggregation, {});
+
+    const channelVal = channelRes.value || 0;
+    const datasetVal = datasetRes.value || 0;
+    const percentage = datasetVal > 0 ? Number(((channelVal / datasetVal) * 100).toFixed(2)) : 0;
+
+    return {
+      channel: `@${cleanUser}`,
+      metric,
+      aggregation,
+      channel_value: channelVal,
+      dataset_value: datasetVal,
+      percentage,
+      total_videos_channel: channelRes.count,
+      total_videos_dataset: datasetRes.count,
+      summary: `Kênh @${cleanUser} chiếm ${percentage}% tổng ${metric} của toàn bộ dataset (${channelVal.toLocaleString()} / ${datasetVal.toLocaleString()}).`,
+    };
+  }
+
+  /**
+   * Retrieves top creators aggregated by total views, likes, or video count.
+   */
+  getTopCreators(
+    metric: 'views' | 'likes' | 'comments' = 'views',
+    limit: number = 5,
+    order: 'DESC' | 'ASC' = 'DESC'
+  ): {
+    username: string;
+    display_name: string;
+    total_videos: number;
+    total_views: number;
+    total_likes: number;
+    total_comments: number;
+    avg_views: number;
+  }[] {
+    const col = metric === 'likes' ? 'SUM(v.likes)' : metric === 'comments' ? 'SUM(v.comments_count)' : 'SUM(v.views)';
+    const sql = `
+      SELECT 
+        v.username,
+        MAX(v.display_name) as display_name,
+        COUNT(v.video_id) as total_videos,
+        SUM(v.views) as total_views,
+        SUM(v.likes) as total_likes,
+        SUM(v.comments_count) as total_comments,
+        ROUND(AVG(v.views), 1) as avg_views
+      FROM videos v
+      WHERE v.status = 'completed' AND v.username IS NOT NULL AND v.username != ''
+      GROUP BY v.username
+      ORDER BY ${col} ${order}
+      LIMIT ?
+    `;
+    const rows = this.db.prepare(sql).all(limit) as any[];
+    return rows.map((r) => ({
+      username: r.username,
+      display_name: r.display_name || r.username,
+      total_videos: Number(r.total_videos) || 0,
+      total_views: Number(r.total_views) || 0,
+      total_likes: Number(r.total_likes) || 0,
+      total_comments: Number(r.total_comments) || 0,
+      avg_views: Number(r.avg_views) || 0,
+    }));
   }
 
   /**

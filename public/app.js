@@ -7,6 +7,8 @@
 const state = {
   allVideos: [],
   filteredVideos: [],
+  allProfiles: [],
+  selectedProfile: null,
   activeFilter: 'all', // 'all' | 'single' | 'profile'
   activeSort: 'newest',
   searchQuery: '',
@@ -25,7 +27,9 @@ const state = {
 const elements = {
   mainTabs: {
     btnCrawler: document.getElementById('btnTabCrawler'),
+    btnProfiles: document.getElementById('btnTabProfiles'),
     btnAnalytics: document.getElementById('btnTabAnalytics'),
+    tabProfilesBadge: document.getElementById('tabProfilesBadge'),
     viewCrawler: document.getElementById('viewCrawler'),
     viewAnalytics: document.getElementById('viewAnalytics'),
   },
@@ -99,7 +103,22 @@ const elements = {
     sortSelect: document.getElementById('sortSelect'),
   },
   grid: document.getElementById('videoGrid'),
+  profilesGrid: document.getElementById('profilesGrid'),
+  channelDetailBanner: document.getElementById('channelDetailBanner'),
+  btnBackToProfiles: document.getElementById('btnBackToProfiles'),
+  channelBannerAvatar: document.getElementById('channelBannerAvatar'),
+  channelBannerName: document.getElementById('channelBannerName'),
+  channelBannerUser: document.getElementById('channelBannerUser'),
+  channelBannerLink: document.getElementById('channelBannerLink'),
+  channelBannerBio: document.getElementById('channelBannerBio'),
+  cbVideos: document.getElementById('cbVideos'),
+  cbViews: document.getElementById('cbViews'),
+  cbLikes: document.getElementById('cbLikes'),
+  cbComments: document.getElementById('cbComments'),
+  cbSize: document.getElementById('cbSize'),
   emptyState: document.getElementById('emptyState'),
+  emptyTitle: document.getElementById('emptyTitle'),
+  emptyDesc: document.getElementById('emptyDesc'),
   btnRefresh: document.getElementById('btnRefresh'),
   modal: {
     backdrop: document.getElementById('modalBackdrop'),
@@ -229,7 +248,7 @@ async function fetchVideos() {
     if (elements.btnRefresh) {
       elements.btnRefresh.classList.add('loading');
     }
-    const res = await fetch('/api/videos');
+    const res = await fetch('/api/videos?limit=5000');
     if (!res.ok) throw new Error(`HTTP error: ${res.status}`);
     const data = await res.json();
     state.allVideos = data.videos || [];
@@ -237,6 +256,8 @@ async function fetchVideos() {
     updateStatsBar(data);
     updatePillCounters();
     applyFiltersAndSort();
+    // Also fetch profiles in parallel
+    fetchProfiles();
   } catch (err) {
     console.error('Failed to fetch videos:', err);
     showToast('Lỗi khi tải dữ liệu video: ' + err.message);
@@ -244,6 +265,21 @@ async function fetchVideos() {
     if (elements.btnRefresh) {
       elements.btnRefresh.classList.remove('loading');
     }
+  }
+}
+
+async function fetchProfiles() {
+  try {
+    const res = await fetch('/api/profiles');
+    if (!res.ok) throw new Error(`HTTP error: ${res.status}`);
+    const data = await res.json();
+    state.allProfiles = data.profiles || [];
+    updatePillCounters();
+    if (state.activeFilter === 'profile' && !state.selectedProfile) {
+      renderProfilesGrid();
+    }
+  } catch (err) {
+    console.error('Failed to fetch profiles:', err);
   }
 }
 
@@ -278,25 +314,244 @@ function updateStatsBar(data) {
 function updatePillCounters() {
   const total = state.allVideos.length;
   const single = state.allVideos.filter((v) => !v.profileId).length;
-  const profile = state.allVideos.filter((v) => !!v.profileId).length;
+  const profileCount = state.allProfiles.length;
 
   elements.filters.allCount.textContent = total;
   elements.filters.singleCount.textContent = single;
-  elements.filters.profileCount.textContent = profile;
+  elements.filters.profileCount.textContent = profileCount;
+  if (elements.mainTabs.tabProfilesBadge) {
+    elements.mainTabs.tabProfilesBadge.textContent = `${profileCount} kênh`;
+  }
 }
 
 // ==========================================
 // Filtering & Sorting
 // ==========================================
 
+async function selectProfile(profile) {
+  state.selectedProfile = profile;
+  state.activeFilter = 'profile';
+  elements.filters.pillBtns.forEach((b) => {
+    b.classList.toggle('active', b.dataset.filter === 'profile');
+  });
+
+  renderChannelDetailBanner(profile);
+
+  // Directly fetch all videos of this specific channel from the backend
+  try {
+    const pId = profile.profileId || '';
+    const uName = profile.username || '';
+    let url = `/api/videos?limit=5000`;
+    if (pId) url += `&profileId=${encodeURIComponent(pId)}`;
+    if (uName) url += `&username=${encodeURIComponent(uName)}`;
+
+    const res = await fetch(url);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.videos && data.videos.length > 0) {
+        // Merge fetched channel videos into state.allVideos ensuring no missing records
+        const existingIds = new Set(data.videos.map((v) => v.videoId));
+        state.allVideos = [...data.videos, ...state.allVideos.filter((v) => !existingIds.has(v.videoId))];
+      }
+    }
+  } catch (err) {
+    console.error('Failed to load profile videos:', err);
+  }
+
+  applyFiltersAndSort();
+  window.scrollTo({ top: document.querySelector('.toolbar')?.offsetTop - 70 || 0, behavior: 'smooth' });
+}
+
+function renderChannelDetailBanner(p) {
+  if (!elements.channelDetailBanner) return;
+  elements.channelDetailBanner.classList.remove('hidden');
+
+  const avatarSrc = p.avatarUrl || 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" fill="%236e7187"><circle cx="32" cy="22" r="14"/><path d="M32 40c-14 0-18 6-18 14v4h36v-4c0-8-4-14-18-14z"/></svg>';
+  if (elements.channelBannerAvatar) elements.channelBannerAvatar.src = avatarSrc;
+  if (elements.channelBannerName) elements.channelBannerName.textContent = p.displayName || p.username;
+  if (elements.channelBannerUser) elements.channelBannerUser.textContent = `@${p.username}`;
+  if (elements.channelBannerLink) {
+    elements.channelBannerLink.href = p.profileUrl || `https://www.tiktok.com/@${p.username}`;
+  }
+  if (elements.channelBannerBio) {
+    if (p.bio) {
+      elements.channelBannerBio.textContent = p.bio;
+      elements.channelBannerBio.style.display = 'block';
+    } else {
+      elements.channelBannerBio.style.display = 'none';
+    }
+  }
+  if (elements.cbVideos) elements.cbVideos.textContent = formatNumber(p.localVideos);
+  if (elements.cbViews) elements.cbViews.textContent = formatNumber(p.totalViews);
+  if (elements.cbLikes) elements.cbLikes.textContent = formatNumber(p.totalLikes);
+  if (elements.cbComments) elements.cbComments.textContent = formatNumber(p.totalComments);
+  if (elements.cbSize) elements.cbSize.textContent = formatBytes(p.totalSize);
+}
+
+function renderProfilesGrid() {
+  if (!elements.profilesGrid) return;
+  elements.profilesGrid.innerHTML = '';
+
+  let list = [...state.allProfiles];
+
+  // 1. Search Query Filter for Profiles
+  if (state.searchQuery.trim()) {
+    const q = state.searchQuery.toLowerCase().trim();
+    list = list.filter((p) => {
+      const u = (p.username || '').toLowerCase();
+      const dn = (p.displayName || '').toLowerCase();
+      const bio = (p.bio || '').toLowerCase();
+      return u.includes(q) || dn.includes(q) || bio.includes(q);
+    });
+  }
+
+  // 2. Sorting
+  switch (state.activeSort) {
+    case 'views':
+      list.sort((a, b) => (b.totalViews || 0) - (a.totalViews || 0));
+      break;
+    case 'likes':
+      list.sort((a, b) => (b.totalLikes || b.tiktokLikes || 0) - (a.totalLikes || a.tiktokLikes || 0));
+      break;
+    case 'comments':
+      list.sort((a, b) => (b.totalComments || 0) - (a.totalComments || 0));
+      break;
+    case 'size':
+      list.sort((a, b) => (b.totalSize || 0) - (a.totalSize || 0));
+      break;
+    case 'newest':
+    default:
+      list.sort((a, b) => (b.localVideos || 0) - (a.localVideos || 0) || (b.followers || 0) - (a.followers || 0));
+      break;
+  }
+
+  if (list.length === 0) {
+    elements.emptyState.classList.remove('hidden');
+    if (elements.emptyTitle) elements.emptyTitle.textContent = 'Không tìm thấy kênh nào';
+    if (elements.emptyDesc) elements.emptyDesc.textContent = 'Thử tìm với từ khóa khác hoặc cào thêm kênh mới.';
+    return;
+  }
+  elements.emptyState.classList.add('hidden');
+
+  const fragment = document.createDocumentFragment();
+
+  list.forEach((p) => {
+    const card = document.createElement('div');
+    card.className = 'profile-card';
+
+    const pct = p.tiktokVideos > 0 ? Math.min(100, Math.round((p.localVideos / p.tiktokVideos) * 100)) : (p.localVideos > 0 ? 100 : 0);
+    const avatarSrc = p.avatarUrl || 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" fill="%236e7187"><circle cx="32" cy="22" r="14"/><path d="M32 40c-14 0-18 6-18 14v4h36v-4c0-8-4-14-18-14z"/></svg>';
+
+    card.innerHTML = `
+      <div>
+        <div class="profile-card-header">
+          <div class="profile-card-avatar-wrap">
+            <img src="${escapeHtml(avatarSrc)}" alt="${escapeHtml(p.displayName)}" class="profile-card-avatar" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'64\\' height=\\'64\\' fill=\\'%236e7187\\'><circle cx=\\'32\\' cy=\\'22\\' r=\\'14\\'/><path d=\\'M32 40c-14 0-18 6-18 14v4h36v-4c0-8-4-14-18-14z\\'/></svg>'">
+            <span class="profile-card-badge-online" title="Kênh đã trích xuất"></span>
+          </div>
+          <div class="profile-card-meta">
+            <div class="profile-card-title-row">
+              <h3 class="profile-card-name" title="${escapeHtml(p.displayName)}">${escapeHtml(p.displayName)}</h3>
+              <a href="${escapeHtml(p.profileUrl)}" target="_blank" rel="noopener noreferrer" class="profile-card-tiktok-link" title="Xem trên TikTok" onclick="event.stopPropagation()">
+                TikTok ↗
+              </a>
+            </div>
+            <span class="profile-card-handle">@${escapeHtml(p.username)}</span>
+          </div>
+        </div>
+
+        ${p.bio ? `<p class="profile-card-bio" title="${escapeHtml(p.bio)}">${escapeHtml(p.bio)}</p>` : '<p class="profile-card-bio" style="color:var(--text-muted);font-style:italic;">Chưa có tiểu sử</p>'}
+
+        <div class="profile-card-public-stats">
+          <div class="public-stat-item">
+            <span class="public-stat-val">${formatNumber(p.followers)}</span>
+            <span class="public-stat-lbl">Followers</span>
+          </div>
+          <div class="public-stat-item">
+            <span class="public-stat-val">${formatNumber(p.tiktokLikes)}</span>
+            <span class="public-stat-lbl">Likes</span>
+          </div>
+          <div class="public-stat-item">
+            <span class="public-stat-val">${formatNumber(p.tiktokVideos)}</span>
+            <span class="public-stat-lbl">Videos</span>
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <div class="profile-card-local-box">
+          <div class="local-box-header">
+            <span class="local-box-title">
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+              </svg>
+              Đã cào: ${formatNumber(p.localVideos)}${p.tiktokVideos > 0 ? ` / ${formatNumber(p.tiktokVideos)}` : ''} video
+            </span>
+            <span class="local-box-percent">${pct}%</span>
+          </div>
+          <div class="local-progress-bar">
+            <div class="local-progress-fill" style="width: ${pct}%;"></div>
+          </div>
+          <div class="local-metrics-row">
+            <div class="local-metric-item">👁️ <strong>${formatNumber(p.totalViews)}</strong> views</div>
+            <div class="local-metric-item">💬 <strong>${formatNumber(p.totalComments)}</strong> cmt</div>
+            <div class="local-metric-item">📦 <strong>${formatBytes(p.totalSize)}</strong></div>
+          </div>
+        </div>
+
+        <div class="profile-card-action" style="margin-top: 14px;">
+          <button class="btn-channel-videos">
+            <span>Xem ${formatNumber(p.localVideos)} video của kênh</span>
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5">
+              <line x1="5" y1="12" x2="19" y2="12"></line>
+              <polyline points="12 5 19 12 12 19"></polyline>
+            </svg>
+          </button>
+        </div>
+      </div>
+    `;
+
+    card.addEventListener('click', () => {
+      selectProfile(p);
+    });
+
+    fragment.appendChild(card);
+  });
+
+  elements.profilesGrid.appendChild(fragment);
+}
+
 function applyFiltersAndSort() {
+  // If active filter is Profiles and no individual channel is selected: Show Profiles Grid
+  if (state.activeFilter === 'profile' && !state.selectedProfile) {
+    elements.grid.classList.add('hidden');
+    if (elements.channelDetailBanner) elements.channelDetailBanner.classList.add('hidden');
+    if (elements.profilesGrid) elements.profilesGrid.classList.remove('hidden');
+    renderProfilesGrid();
+    return;
+  }
+
+  // Otherwise, we are showing Video Grid
+  if (elements.profilesGrid) elements.profilesGrid.classList.add('hidden');
+  elements.grid.classList.remove('hidden');
+
   let list = [...state.allVideos];
 
-  // 1. Pill Filter (all / single / profile)
-  if (state.activeFilter === 'single') {
-    list = list.filter((v) => !v.profileId);
-  } else if (state.activeFilter === 'profile') {
-    list = list.filter((v) => !!v.profileId);
+  // 1. Channel drill-down or Pill Filter
+  if (state.selectedProfile) {
+    renderChannelDetailBanner(state.selectedProfile);
+    const pId = String(state.selectedProfile.profileId || '');
+    const uName = (state.selectedProfile.username || '').toLowerCase();
+    list = list.filter((v) => {
+      const vProfileId = v.profileId ? String(v.profileId) : '';
+      const vUsername = (v.username || '').toLowerCase();
+      return (pId && vProfileId === pId) || (uName && vUsername === uName);
+    });
+  } else {
+    if (elements.channelDetailBanner) elements.channelDetailBanner.classList.add('hidden');
+    if (state.activeFilter === 'single') {
+      list = list.filter((v) => !v.profileId);
+    }
   }
 
   // 2. Search Query Filter
@@ -742,6 +997,7 @@ function initEvents() {
   });
 
   // 2. Search Input
+  setupMentionForInput(elements.filters.searchInput, 'below');
   let searchTimeout = null;
   elements.filters.searchInput.addEventListener('input', (e) => {
     clearTimeout(searchTimeout);
@@ -762,13 +1018,30 @@ function initEvents() {
 
   // 3. Pill Filters
   elements.filters.pillBtns.forEach((btn) => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       elements.filters.pillBtns.forEach((b) => b.classList.remove('active'));
       btn.classList.add('active');
+      const prevProfile = state.selectedProfile;
       state.activeFilter = btn.dataset.filter;
-      applyFiltersAndSort();
+      if (state.activeFilter !== 'profile') {
+        state.selectedProfile = null;
+      }
+      if (prevProfile && state.activeFilter !== 'profile') {
+        await fetchVideos();
+      } else {
+        applyFiltersAndSort();
+      }
     });
   });
+
+  // 3.1 Back to Profiles Button
+  if (elements.btnBackToProfiles) {
+    elements.btnBackToProfiles.addEventListener('click', () => {
+      state.selectedProfile = null;
+      state.activeFilter = 'profile';
+      applyFiltersAndSort();
+    });
+  }
 
   // 4. Sort Select
   elements.filters.sortSelect.addEventListener('change', (e) => {
@@ -828,6 +1101,7 @@ function initEvents() {
 
   // 10. Ingest & Crawl Controls
   if (elements.ingest.input) {
+    setupMentionForInput(elements.ingest.input, 'below');
     elements.ingest.input.addEventListener('input', (e) => {
       if (e.target.value.trim().length > 0) {
         elements.ingest.btnClear.classList.remove('hidden');
@@ -837,6 +1111,7 @@ function initEvents() {
     });
 
     elements.ingest.input.addEventListener('keydown', (e) => {
+      if (isMentionDropdownOpen()) return;
       if (e.key === 'Enter') {
         e.preventDefault();
         handleIngest();
@@ -1118,11 +1393,30 @@ function initMainTabs() {
     state.activeMainTab = tabName;
     if (tabName === 'crawler') {
       elements.mainTabs.btnCrawler.classList.add('active');
+      if (elements.mainTabs.btnProfiles) elements.mainTabs.btnProfiles.classList.remove('active');
       elements.mainTabs.btnAnalytics.classList.remove('active');
       elements.mainTabs.viewCrawler.classList.remove('hidden');
       elements.mainTabs.viewAnalytics.classList.add('hidden');
+      if (state.activeFilter === 'profile' && !state.selectedProfile) {
+        state.activeFilter = 'all';
+        elements.filters.pillBtns.forEach((b) => b.classList.toggle('active', b.dataset.filter === 'all'));
+        applyFiltersAndSort();
+      }
+    } else if (tabName === 'profiles') {
+      if (elements.mainTabs.btnProfiles) elements.mainTabs.btnProfiles.classList.add('active');
+      elements.mainTabs.btnCrawler.classList.remove('active');
+      elements.mainTabs.btnAnalytics.classList.remove('active');
+      elements.mainTabs.viewCrawler.classList.remove('hidden');
+      elements.mainTabs.viewAnalytics.classList.add('hidden');
+
+      state.activeFilter = 'profile';
+      state.selectedProfile = null;
+      elements.filters.pillBtns.forEach((b) => b.classList.toggle('active', b.dataset.filter === 'profile'));
+      applyFiltersAndSort();
+      window.scrollTo({ top: document.querySelector('.toolbar')?.offsetTop - 70 || 0, behavior: 'smooth' });
     } else {
       elements.mainTabs.btnCrawler.classList.remove('active');
+      if (elements.mainTabs.btnProfiles) elements.mainTabs.btnProfiles.classList.remove('active');
       elements.mainTabs.btnAnalytics.classList.add('active');
       elements.mainTabs.viewCrawler.classList.add('hidden');
       elements.mainTabs.viewAnalytics.classList.remove('hidden');
@@ -1131,11 +1425,279 @@ function initMainTabs() {
   }
 
   elements.mainTabs.btnCrawler.addEventListener('click', () => switchTab('crawler'));
+  if (elements.mainTabs.btnProfiles) {
+    elements.mainTabs.btnProfiles.addEventListener('click', () => switchTab('profiles'));
+  }
   elements.mainTabs.btnAnalytics.addEventListener('click', () => switchTab('analytics'));
+}
+
+// ==========================================
+// @Mention Autocomplete System
+// ==========================================
+
+let mentionState = {
+  activeInput: null,
+  dropdownEl: null,
+  filteredProfiles: [],
+  selectedIndex: 0,
+  position: 'above',
+};
+
+function initMentionDropdown() {
+  if (mentionState.dropdownEl) return mentionState.dropdownEl;
+
+  const dropdown = document.createElement('div');
+  dropdown.id = 'mentionDropdown';
+  dropdown.className = 'mention-dropdown hidden';
+  document.body.appendChild(dropdown);
+  mentionState.dropdownEl = dropdown;
+
+  // Prevent input blur when clicking inside dropdown
+  dropdown.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+  });
+
+  // Global click outside to close
+  document.addEventListener('click', (e) => {
+    if (mentionState.dropdownEl && !mentionState.dropdownEl.classList.contains('hidden')) {
+      if (!mentionState.dropdownEl.contains(e.target) && e.target !== mentionState.activeInput) {
+        hideMentionDropdown();
+      }
+    }
+  });
+
+  // Window resize/scroll close
+  window.addEventListener('resize', hideMentionDropdown);
+
+  return dropdown;
+}
+
+function getAvailableProfilesForMention() {
+  if (state.allProfiles && state.allProfiles.length > 0) {
+    return state.allProfiles;
+  }
+  // Fallback: extract distinct channels from state.allVideos
+  const map = new Map();
+  for (const v of state.allVideos || []) {
+    if (v.username && !map.has(v.username.toLowerCase())) {
+      map.set(v.username.toLowerCase(), {
+        username: v.username,
+        displayName: v.displayName || v.username,
+        avatarUrl: v.avatarUrl || '',
+        localVideos: 1,
+      });
+    }
+  }
+  return Array.from(map.values());
+}
+
+function showMentionDropdown(inputEl, position = 'above') {
+  const dropdown = initMentionDropdown();
+  mentionState.activeInput = inputEl;
+  mentionState.position = position;
+
+  const textBeforeCaret = inputEl.value.slice(0, inputEl.selectionStart);
+  // Match @username right before caret
+  const match = textBeforeCaret.match(/(?:^|\s)@([a-zA-Z0-9_.]*)$/);
+  if (!match) {
+    hideMentionDropdown();
+    return;
+  }
+
+  const query = match[1].toLowerCase();
+  const all = getAvailableProfilesForMention();
+  
+  // Filter & sort: exact match or startsWith comes first
+  const filtered = all.filter((p) => {
+    const u = (p.username || '').toLowerCase();
+    const d = (p.displayName || '').toLowerCase();
+    return !query || u.includes(query) || d.includes(query);
+  }).sort((a, b) => {
+    const uA = (a.username || '').toLowerCase();
+    const uB = (b.username || '').toLowerCase();
+    const aStarts = uA.startsWith(query) ? 1 : 0;
+    const bStarts = uB.startsWith(query) ? 1 : 0;
+    if (aStarts !== bStarts) return bStarts - aStarts;
+    return (b.localVideos || 0) - (a.localVideos || 0);
+  });
+
+  if (filtered.length === 0) {
+    hideMentionDropdown();
+    return;
+  }
+
+  mentionState.filteredProfiles = filtered;
+  mentionState.selectedIndex = 0;
+
+  renderMentionList();
+  positionMentionDropdown();
+  dropdown.classList.remove('hidden');
+}
+
+function hideMentionDropdown() {
+  if (mentionState.dropdownEl) {
+    mentionState.dropdownEl.classList.add('hidden');
+  }
+  mentionState.activeInput = null;
+  mentionState.filteredProfiles = [];
+  mentionState.selectedIndex = 0;
+}
+
+function isMentionDropdownOpen() {
+  return mentionState.dropdownEl && !mentionState.dropdownEl.classList.contains('hidden');
+}
+
+function positionMentionDropdown() {
+  if (!mentionState.activeInput || !mentionState.dropdownEl) return;
+  const rect = mentionState.activeInput.getBoundingClientRect();
+  const dropdown = mentionState.dropdownEl;
+
+  dropdown.style.left = `${Math.max(12, Math.min(rect.left, window.innerWidth - 372))}px`;
+
+  if (mentionState.position === 'above') {
+    dropdown.style.bottom = `${window.innerHeight - rect.top + 8}px`;
+    dropdown.style.top = 'auto';
+  } else {
+    dropdown.style.top = `${rect.bottom + 8}px`;
+    dropdown.style.bottom = 'auto';
+  }
+}
+
+function renderMentionList() {
+  const dropdown = mentionState.dropdownEl;
+  if (!dropdown) return;
+
+  const profiles = mentionState.filteredProfiles;
+  dropdown.innerHTML = `
+    <div class="mention-dropdown-header">
+      <span>Chọn Kênh TikTok (@)</span>
+      <span class="hint">↑↓ Chọn • Enter</span>
+    </div>
+  `;
+
+  profiles.forEach((p, idx) => {
+    const item = document.createElement('div');
+    item.className = `mention-item ${idx === mentionState.selectedIndex ? 'active' : ''}`;
+    item.dataset.index = idx;
+
+    const avatarSrc = p.avatarUrl || 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" fill="%236e7187"><circle cx="16" cy="11" r="7"/><path d="M16 20c-7 0-9 3-9 7v2h18v-2c0-4-2-7-9-7z"/></svg>';
+    const videoCountText = p.localVideos ? `${formatNumber(p.localVideos)} video` : (p.tiktokVideos ? `${formatNumber(p.tiktokVideos)} video` : 'Kênh');
+
+    item.innerHTML = `
+      <div class="mention-avatar-wrap">
+        <img src="${escapeHtml(avatarSrc)}" alt="${escapeHtml(p.displayName)}" class="mention-avatar" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'32\\' height=\\'32\\' fill=\\'%236e7187\\'><circle cx=\\'16\\' cy=\\'11\\' r=\\'7\\'/><path d=\\'M16 20c-7 0-9 3-9 7v2h18v-2c0-4-2-7-9-7z\\'/></svg>'">
+      </div>
+      <div class="mention-info">
+        <div class="mention-name-row">
+          <span class="mention-display-name">${escapeHtml(p.displayName || p.username)}</span>
+        </div>
+        <span class="mention-handle">@${escapeHtml(p.username)}</span>
+      </div>
+      <span class="mention-badge">${videoCountText}</span>
+    `;
+
+    item.addEventListener('mouseenter', () => {
+      mentionState.selectedIndex = idx;
+      updateActiveMentionItem();
+    });
+
+    item.addEventListener('click', (e) => {
+      e.preventDefault();
+      selectMentionProfile(p);
+    });
+
+    dropdown.appendChild(item);
+  });
+}
+
+function updateActiveMentionItem() {
+  if (!mentionState.dropdownEl) return;
+  const items = mentionState.dropdownEl.querySelectorAll('.mention-item');
+  items.forEach((item, idx) => {
+    const isActive = idx === mentionState.selectedIndex;
+    item.classList.toggle('active', isActive);
+    if (isActive) {
+      item.scrollIntoView({ block: 'nearest' });
+    }
+  });
+}
+
+function selectMentionProfile(profile) {
+  const input = mentionState.activeInput;
+  if (!input || !profile) return;
+
+  const value = input.value;
+  const caret = input.selectionStart;
+  const before = value.slice(0, caret);
+  const after = value.slice(caret);
+
+  const atPos = before.lastIndexOf('@');
+  if (atPos === -1) {
+    hideMentionDropdown();
+    return;
+  }
+
+  const newBefore = before.slice(0, atPos) + `@${profile.username} `;
+  input.value = newBefore + after;
+
+  const newCaret = newBefore.length;
+  input.focus();
+  input.setSelectionRange(newCaret, newCaret);
+
+  // Trigger input event so any listeners (auto-resize, search filter, etc.) get notified
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+
+  hideMentionDropdown();
+}
+
+function setupMentionForInput(inputEl, position = 'above') {
+  if (!inputEl) return;
+
+  // Listen to input
+  inputEl.addEventListener('input', () => {
+    showMentionDropdown(inputEl, position);
+  });
+
+  // Listen to keyup for arrows/navigation within text
+  inputEl.addEventListener('keyup', (e) => {
+    if (['ArrowDown', 'ArrowUp', 'Enter', 'Escape', 'Tab'].includes(e.key)) return;
+    showMentionDropdown(inputEl, position);
+  });
+
+  // Listen to keydown to capture navigation & Enter
+  inputEl.addEventListener('keydown', (e) => {
+    if (!isMentionDropdownOpen()) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      mentionState.selectedIndex = (mentionState.selectedIndex + 1) % mentionState.filteredProfiles.length;
+      updateActiveMentionItem();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      mentionState.selectedIndex = (mentionState.selectedIndex - 1 + mentionState.filteredProfiles.length) % mentionState.filteredProfiles.length;
+      updateActiveMentionItem();
+    } else if (e.key === 'Enter' || e.key === 'Tab') {
+      if (mentionState.filteredProfiles.length > 0) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        const selected = mentionState.filteredProfiles[mentionState.selectedIndex];
+        selectMentionProfile(selected);
+      }
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      hideMentionDropdown();
+    }
+  }, true); // Use capture phase so we intercept Enter before chat submission!
 }
 
 function initChatEvents() {
   if (!elements.chat.btnSend || !elements.chat.input) return;
+
+  // Set up @mention autocomplete on chat input (opens above the bar)
+  setupMentionForInput(elements.chat.input, 'above');
 
   // Send on click
   elements.chat.btnSend.addEventListener('click', () => {
@@ -1144,6 +1706,7 @@ function initChatEvents() {
 
   // Send on Enter (Shift+Enter for newline)
   elements.chat.input.addEventListener('keydown', (e) => {
+    if (isMentionDropdownOpen()) return;
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendChatMessage();
@@ -1859,5 +2422,6 @@ document.addEventListener('DOMContentLoaded', () => {
   initChatEvents();
   initAiConfigEvents();
   fetchVideos();
+  fetchProfiles();
   fetchSystemInfo();
 });

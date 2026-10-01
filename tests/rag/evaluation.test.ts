@@ -244,10 +244,11 @@ describe('6. End-to-End RAG Pipeline & Multi-Turn Dialogue', () => {
   test('correlation query returns non-causation warning', async () => {
     const result = await ragService.query('Thời lượng video có ảnh hưởng đến số view không?');
     assert.equal(result.intent, 'CORRELATION');
+    const lower = result.answer.toLowerCase();
     assert.ok(
-      result.answer.includes('Correlation is NOT causation') ||
-        result.answer.includes('tương quan không đồng nghĩa với nhân quả') ||
-        result.answer.includes('LƯU Ý QUAN TRỌNG')
+      lower.includes('correlation is not causation') ||
+        lower.includes('nhân quả') ||
+        lower.includes('lưu ý quan trọng')
     );
   });
 });

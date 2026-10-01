@@ -159,6 +159,61 @@ export class OpenAILLMClient implements LLMClient {
           }
           lines.push('');
           lines.push(`**Tóm tắt:** ${comp.summary}`);
+        } else if (comparisons && (comparisons as any).creator_a && (comparisons as any).creator_b) {
+          const comp = comparisons as any;
+          lines.push(`### ⚖️ So sánh chi tiết 2 Kênh`);
+          const uA = comp.creator_a.username.replace(/^@/, '');
+          const uB = comp.creator_b.username.replace(/^@/, '');
+          lines.push(`- **Kênh A:** @${uA} (${comp.creator_a.total_videos} video)`);
+          lines.push(`- **Kênh B:** @${uB} (${comp.creator_b.total_videos} video)`);
+          lines.push('');
+
+          if (comp.comparison_rows && comp.comparison_rows.length > 0) {
+            lines.push(
+              `| Chỉ số | Phép tính | @${uA} | @${uB} | Chênh lệch (%) | Kết luận |`
+            );
+            lines.push(`| :--- | :--- | :--- | :--- | :--- | :--- |`);
+            for (const r of comp.comparison_rows) {
+              const metricLabel =
+                r.metric === 'views'
+                  ? 'Lượt xem (Views)'
+                  : r.metric === 'likes'
+                  ? 'Lượt thích (Likes)'
+                  : r.metric === 'shares'
+                  ? 'Lượt chia sẻ (Shares)'
+                  : r.metric === 'comments'
+                  ? 'Bình luận (Comments)'
+                  : r.metric === 'video_id' || r.metric === 'videos'
+                  ? 'Số lượng video'
+                  : r.metric;
+              const valA = r.value_a !== null ? Number(r.value_a).toLocaleString() : 'N/A';
+              const valB = r.value_b !== null ? Number(r.value_b).toLocaleString() : 'N/A';
+              const diffPct =
+                r.percent_diff !== null
+                  ? (r.percent_diff >= 0 ? '+' : '') + r.percent_diff + '%'
+                  : 'N/A';
+              lines.push(
+                `| **${metricLabel}** | ${r.aggregation} | ${valA} | ${valB} | ${diffPct} | ${r.higher} cao hơn |`
+              );
+            }
+          } else {
+            lines.push(`| Chỉ số | @${uA} | @${uB} | Chênh lệch (%) |`);
+            lines.push(`| :--- | :--- | :--- | :--- |`);
+            lines.push(
+              `| **Median Views** | ${comp.creator_a.median_views.toLocaleString()} | ${comp.creator_b.median_views.toLocaleString()} | ${comp.differences.views_diff.percent_change !== null ? (comp.differences.views_diff.percent_change >= 0 ? '+' : '') + comp.differences.views_diff.percent_change + '%' : 'N/A'} |`
+            );
+            lines.push(
+              `| **Mean Views** | ${comp.creator_a.mean_views.toLocaleString()} | ${comp.creator_b.mean_views.toLocaleString()} | N/A |`
+            );
+            lines.push(
+              `| **Median Likes** | ${comp.creator_a.median_likes.toLocaleString()} | ${comp.creator_b.median_likes.toLocaleString()} | ${comp.differences.likes_diff.percent_change !== null ? (comp.differences.likes_diff.percent_change >= 0 ? '+' : '') + comp.differences.likes_diff.percent_change + '%' : 'N/A'} |`
+            );
+            lines.push(
+              `| **Engagement Rate** | ${(comp.creator_a.median_engagement * 100).toFixed(2)}% | ${(comp.creator_b.median_engagement * 100).toFixed(2)}% | ${comp.differences.engagement_diff.percent_change !== null ? (comp.differences.engagement_diff.percent_change >= 0 ? '+' : '') + comp.differences.engagement_diff.percent_change + '%' : 'N/A'} |`
+            );
+          }
+          lines.push('');
+          lines.push(`**Tóm tắt:** ${comp.summary}`);
         } else if (comparisons && (comparisons as any).creator) {
           const c = comparisons as any;
           lines.push(`### 📈 Đánh giá hiệu suất kênh @${c.creator} so với toàn bộ Dataset`);
@@ -182,11 +237,25 @@ export class OpenAILLMClient implements LLMClient {
             ? 'Tỉ lệ tương tác (Engagement Rate)'
             : r.metric;
 
-        lines.push(`### 🏆 Bảng xếp hạng Top ${r.videos.length} Video theo ${metricName}`);
+        if (r.target === 'creator' && r.creators) {
+          lines.push(`### 🏆 Bảng xếp hạng Top ${r.creators.length} Kênh theo ${metricName}`);
+          lines.push('');
+          lines.push('| Hạng | Kênh | Tên hiển thị | Tổng Views | Tổng Likes | Số Video | Avg Views |');
+          lines.push('| :---: | :--- | :--- | :--- | :--- | :--- | :--- |');
+          r.creators.forEach((c: any, idx: number) => {
+            lines.push(
+              `| **#${idx + 1}** | @${c.username} | ${c.display_name || c.username} | ${Number(c.total_views || 0).toLocaleString()} | ${Number(c.total_likes || 0).toLocaleString()} | ${c.total_videos} | ${Number(c.avg_views || 0).toLocaleString()} |`
+            );
+          });
+          break;
+        }
+
+        const videosList = r.videos || [];
+        lines.push(`### 🏆 Bảng xếp hạng Top ${videosList.length} Video theo ${metricName}`);
         lines.push('');
         lines.push('| Hạng | Kênh | Lượt xem | Lượt thích | Tương tác | Thời lượng | Video ID |');
         lines.push('| :---: | :--- | :--- | :--- | :--- | :--- | :--- |');
-        r.videos.forEach((v: any, idx: number) => {
+        videosList.forEach((v: any, idx: number) => {
           const eng = v.engagement_rate ? (v.engagement_rate * 100).toFixed(2) + '%' : '0%';
           lines.push(
             `| **#${idx + 1}** | @${v.username} | ${Number(v.views).toLocaleString()} | ${Number(v.likes).toLocaleString()} | ${eng} | ${v.duration}s | \`${v.video_id}\` |`
@@ -195,7 +264,7 @@ export class OpenAILLMClient implements LLMClient {
 
         lines.push('');
         lines.push('#### 🎬 Danh sách chi tiết từng video:');
-        r.videos.forEach((v: any, idx: number) => {
+        videosList.forEach((v: any, idx: number) => {
           const eng = v.engagement_rate ? (v.engagement_rate * 100).toFixed(2) + '%' : '0%';
           const desc = v.description
             ? `"${v.description.replace(/\r?\n/g, ' ').slice(0, 160)}${v.description.length > 160 ? '...' : ''}"`
@@ -214,34 +283,98 @@ export class OpenAILLMClient implements LLMClient {
       }
 
       case 'AGGREGATION': {
-        const a = metrics.aggregation;
-        lines.push(`### 📐 Kết quả tổng hợp số liệu`);
-        lines.push(`- **Phép tính:** \`${a.agg}\` của chỉ số \`${a.metric}\``);
-        lines.push(`- **Giá trị tính toán được:** **${a.value !== null ? a.value.toLocaleString() : 'N/A'}**`);
-        lines.push(`- **Số lượng video trong mẫu tính:** ${a.count} video`);
+        const results = metrics.results || [];
+        const entityLabel = evidence.plan.entity
+          ? `${evidence.plan.entity.type === 'CHANNEL' ? 'kênh' : 'video'} ${evidence.plan.entity.id}`
+          : 'toàn bộ dataset';
 
-        if (a.top_video) {
-          const tv = a.top_video;
-          const desc = tv.description
-            ? `"${tv.description.replace(/\r?\n/g, ' ').slice(0, 160)}${tv.description.length > 160 ? '...' : ''}"`
-            : '*(Không có mô tả)*';
-          const link = tv.tiktok_url || `https://www.tiktok.com/@${tv.username}/video/${tv.video_id}`;
+        lines.push(`### 📐 Kết quả tổng hợp số liệu (${entityLabel})`);
 
-          lines.push('');
-          lines.push(`#### 🎬 Video nắm giữ kỷ lục \`${a.agg}\` này:`);
-          lines.push(`- **Video ID:** \`${tv.video_id}\``);
-          lines.push(`- **Kênh tác giả:** @${tv.username} (${tv.display_name || tv.username})`);
-          lines.push(`- **Mô tả / Caption:** ${desc}`);
-          lines.push(
-            `- **Thông số:** 👁️ **${Number(tv.views).toLocaleString()}** views | ❤️ **${Number(tv.likes).toLocaleString()}** likes | 💬 **${Number(tv.comments || 0).toLocaleString()}** comments`
-          );
-          lines.push(`- **Link trực tiếp:** [Xem video trên TikTok ↗](${link})`);
-        }
+        if (results.length > 0) {
+          for (const item of results) {
+            if (item.aggregation === 'PERCENTAGE_OF_GLOBAL') {
+              const metricName =
+                item.metric === 'views'
+                  ? 'lượt xem'
+                  : item.metric === 'likes'
+                  ? 'lượt thích'
+                  : item.metric === 'shares'
+                  ? 'lượt share'
+                  : item.metric;
+              lines.push(
+                `- **Tỉ lệ chiếm của kênh ${item.scope}:** **${item.value}%** tổng ${metricName} của toàn bộ dataset (${Number(item.channel_value).toLocaleString()} / ${Number(item.dataset_value).toLocaleString()})`
+              );
+              continue;
+            }
 
-        if (benchmarks?.dataset_baseline) {
-          const base = benchmarks.dataset_baseline.metrics[a.metric];
-          if (base) {
-            lines.push(`- **Dataset Reference (Median):** ${base.median.toLocaleString()} (Mean: ${base.mean.toLocaleString()})`);
+            const isRate = [
+              'like_rate',
+              'comment_rate',
+              'share_rate',
+              'save_rate',
+              'engagement_rate',
+            ].includes(item.metric);
+
+            if (isRate) {
+              const rateName =
+                item.metric === 'share_rate'
+                  ? 'Tỉ lệ chia sẻ (Share rate)'
+                  : item.metric === 'like_rate'
+                  ? 'Tỉ lệ thích (Like rate)'
+                  : item.metric === 'comment_rate'
+                  ? 'Tỉ lệ bình luận (Comment rate)'
+                  : item.metric === 'save_rate'
+                  ? 'Tỉ lệ lưu (Save rate)'
+                  : item.metric === 'engagement_rate'
+                  ? 'Tỉ lệ tương tác (Engagement rate)'
+                  : item.metric;
+
+              const formulaTag = item.formula ? ` [${item.formula}]` : ` [${item.aggregation}]`;
+              const pct = item.value !== null ? `${(Number(item.value) * 100).toFixed(2)}%` : 'N/A';
+              const rawDec = item.value !== null ? Number(item.value).toFixed(4) : 'N/A';
+              lines.push(
+                `- **${rateName}${formulaTag}:** **${pct}** (tỉ lệ ${rawDec})`
+              );
+              continue;
+            }
+
+            const metricName =
+              item.metric === 'video_id' || item.metric === 'videos'
+                ? 'Số lượng video'
+                : item.metric === 'views'
+                ? 'Lượt xem (Views)'
+                : item.metric === 'likes'
+                ? 'Lượt thích (Likes)'
+                : item.metric === 'comments'
+                ? 'Bình luận (Comments)'
+                : item.metric === 'shares'
+                ? 'Lượt chia sẻ (Shares)'
+                : item.metric === 'saves'
+                ? 'Lưu lại (Saves)'
+                : item.metric;
+
+            if (item.metric === 'video_id' || item.metric === 'videos') {
+              lines.push(`- **${metricName}:** **${Number(item.value).toLocaleString()}** video`);
+            } else if (item.aggregation === 'AVG' && item.metric === 'shares') {
+              lines.push(
+                `- **Lượt chia sẻ trung bình mỗi video (Avg Shares) [AVG]:** **${item.value !== null ? Number(item.value).toLocaleString() : 'N/A'}** lượt chia sẻ / video`
+              );
+            } else {
+              const aggPrefix =
+                item.aggregation === 'SUM' ? 'Tổng ' : item.aggregation === 'AVG' ? 'Trung bình ' : '';
+              lines.push(
+                `- **${aggPrefix}${metricName} [${item.aggregation}]:** **${item.value !== null ? Number(item.value).toLocaleString() : 'N/A'}**`
+              );
+            }
+          }
+        } else {
+          const aggs =
+            metrics.aggregations ||
+            (metrics.aggregation ? { [metrics.aggregation.metric]: metrics.aggregation } : {});
+          const keys = Object.keys(aggs);
+          for (const k of keys) {
+            const a = aggs[k];
+            lines.push(`- **${k} [${a.agg}]:** **${a.value !== null ? Number(a.value).toLocaleString() : 'N/A'}**`);
           }
         }
         break;

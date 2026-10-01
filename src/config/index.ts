@@ -65,8 +65,9 @@ export const config = {
   // Keep the network-facing pools lower so TikTok/CDN requests stay stable.
   metadataConcurrency: getEnvNumber('TIKTOK_METADATA_CONCURRENCY', Math.min(8, detectedCpuThreads)),
   mediaConcurrency: getEnvNumber('TIKTOK_MEDIA_CONCURRENCY', Math.min(6, detectedCpuThreads)),
-  commentConcurrency: getEnvNumber('TIKTOK_COMMENT_CONCURRENCY', Math.min(4, Math.ceil(detectedCpuThreads / 2))),
+  commentConcurrency: getEnvNumber('TIKTOK_COMMENT_CONCURRENCY', Math.min(12, detectedCpuThreads)),
   requestDelayMs: getEnvNumber('TIKTOK_REQUEST_DELAY_MS', 300),
+  commentRequestDelayMs: getEnvNumber('TIKTOK_COMMENT_REQUEST_DELAY_MS', 80),
   mediaRequestDelayMs: getEnvNumber('TIKTOK_MEDIA_REQUEST_DELAY_MS', 50),
   mediaStallTimeoutMs: getEnvNumber('TIKTOK_MEDIA_STALL_TIMEOUT_MS', 45000),
   maxCommentsPerVideo: getEnvNumber('MAX_COMMENTS_PER_VIDEO', 1000),

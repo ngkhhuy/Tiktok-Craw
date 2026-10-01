@@ -9,9 +9,12 @@
 
 import { analyticsEngine, VideoAnalyticsDetails, VideoComparisonResult } from '../analytics/analytics-engine.js';
 import { getPopulationBaseline } from '../analytics/baseline.js';
+import { isDerivedRateMetric, getRateMetricFormula } from '../analytics/metric-definitions.js';
+import { normalizeCreatorHandle } from '../query/entity-resolver.js';
 import { getVideoStats } from '../storage/database.js';
 import { QueryPlan } from '../query/intents.js';
 import { RetrievedChunk, semanticRetriever } from '../retrieval/semantic-retriever.js';
+import { SWAYSEEK_SYSTEM_PROMPT } from '../rag/prompts.js';
 
 export interface EvidenceObject {
   question: string;
@@ -69,7 +72,13 @@ export class ContextBuilder {
       }
 
       case 'COMPARISON': {
-        if (plan.entities.videoIds.length >= 2) {
+        if (plan.entities.creators && plan.entities.creators.length >= 2) {
+          evidence.comparisons = analyticsEngine.compareCreators(
+            plan.entities.creators[0],
+            plan.entities.creators[1],
+            plan.metrics
+          ) as any;
+        } else if (plan.entities.videoIds.length >= 2) {
           const comp = analyticsEngine.compareVideos(plan.entities.videoIds[0], plan.entities.videoIds[1]);
           if (comp) {
             evidence.comparisons = comp as any;
@@ -91,39 +100,112 @@ export class ContextBuilder {
       }
 
       case 'AGGREGATION': {
-        const metric = plan.entities.metrics[0] || 'views';
-        const agg = plan.entities.aggregation || 'SUM';
-        const result = analyticsEngine.getAggregate(metric, agg, plan.entities.filters, plan.entities.percentileTarget);
-        evidence.metrics.aggregation = result;
-        evidence.benchmarks = {
-          dataset_baseline: getPopulationBaseline('all_videos'),
-        };
+        const metricsList =
+          plan.metrics && plan.metrics.length > 0
+            ? plan.metrics
+            : (plan.entities.metrics.length > 0 ? plan.entities.metrics : (['views'] as const)).map((m) => ({
+                field: m,
+                aggregation: plan.entities.aggregation || 'SUM',
+              }));
+
+        const filters = { ...plan.entities.filters };
+        if (plan.scope === 'CHANNEL' && plan.entity?.id) {
+          filters.creator = normalizeCreatorHandle(plan.entity.id);
+        }
+
+        const aggregations: Record<string, any> = {};
+        const resultsList: any[] = [];
+        const isGlobalRatio =
+          plan.metrics?.some((m) => m.aggregation === 'RATIO') ||
+          /(?:chiếm bao nhiêu\s*%|chiếm bao nhiêu phần trăm|%\s*tổng|phần trăm tổng|tỉ lệ\s*%|tỷ lệ\s*%|chiếm\s+tỷ\s+lệ|chiếm\s+tỉ\s+lệ)/i.test(question);
+
+        for (const item of metricsList) {
+          if (isGlobalRatio || item.aggregation === 'RATIO') {
+            const share = analyticsEngine.getChannelShareOfDataset(
+              filters.creator || 'all',
+              item.field === 'video_id' ? 'views' : item.field,
+              'SUM'
+            );
+            aggregations[item.field] = share;
+            resultsList.push({
+              metric: item.field,
+              aggregation: 'PERCENTAGE_OF_GLOBAL',
+              scope: plan.entity?.id || (filters.creator ? `@${normalizeCreatorHandle(filters.creator)}` : 'dataset'),
+              channel_value: share.channel_value,
+              dataset_value: share.dataset_value,
+              value: share.percentage,
+              unit: '%',
+              summary: share.summary,
+            });
+          } else {
+            const result = analyticsEngine.getAggregate(
+              item.field,
+              item.aggregation,
+              filters,
+              plan.entities.percentileTarget
+            );
+            aggregations[item.field] = result;
+            const isRate = isDerivedRateMetric(item.field);
+            resultsList.push({
+              metric: item.field,
+              aggregation: item.aggregation,
+              scope: plan.entity?.id || (filters.creator ? `@${normalizeCreatorHandle(filters.creator)}` : 'dataset'),
+              value: result.value,
+              formula: isRate ? getRateMetricFormula(item.field, item.aggregation) : undefined,
+              unit: isRate ? '%' : undefined,
+            });
+          }
+        }
+
+        evidence.metrics.aggregations = aggregations;
+        evidence.metrics.results = resultsList;
+        evidence.metrics.aggregation = aggregations[metricsList[0]?.field || 'views'];
         break;
       }
 
       case 'RANKING': {
         const targetMetric = plan.entities.metrics[0] || 'views';
         const limit = plan.entities.limit || 5;
-        const topVideos = analyticsEngine.getTopVideos(targetMetric, limit, plan.entities.filters, plan.entities.order);
-        evidence.metrics.ranking = {
-          metric: targetMetric,
-          order: plan.entities.order,
-          videos: topVideos.map((v) => ({
-            video_id: v.video_id,
-            username: v.username,
-            display_name: v.display_name,
-            description: v.description,
-            published_at: v.published_at,
-            views: v.views,
-            likes: v.likes,
-            comments: v.comments_count,
-            shares: v.shares,
-            like_rate: v.like_rate,
-            engagement_rate: v.engagement_rate,
-            duration: v.duration,
-            tiktok_url: `https://www.tiktok.com/@${v.username}/video/${v.video_id}`,
-          })),
-        };
+        const isChannel =
+          plan.group_by === 'channel' ||
+          /\b(channel|kênh|creator)\b/i.test(question) ||
+          /\b(channel|kênh|creator)\b/i.test(plan.explanation);
+
+        if (isChannel) {
+          const topCreators = analyticsEngine.getTopCreators(
+            targetMetric === 'likes' ? 'likes' : targetMetric === 'comments' ? 'comments' : 'views',
+            limit,
+            plan.entities.order
+          );
+          evidence.metrics.ranking = {
+            target: 'creator',
+            metric: targetMetric,
+            order: plan.entities.order,
+            creators: topCreators,
+          };
+        } else {
+          const topVideos = analyticsEngine.getTopVideos(targetMetric, limit, plan.entities.filters, plan.entities.order);
+          evidence.metrics.ranking = {
+            target: 'video',
+            metric: targetMetric,
+            order: plan.entities.order,
+            videos: topVideos.map((v) => ({
+              video_id: v.video_id,
+              username: v.username,
+              display_name: v.display_name,
+              description: v.description,
+              published_at: v.published_at,
+              views: v.views,
+              likes: v.likes,
+              comments: v.comments_count,
+              shares: v.shares,
+              like_rate: v.like_rate,
+              engagement_rate: v.engagement_rate,
+              duration: v.duration,
+              tiktok_url: `https://www.tiktok.com/@${v.username}/video/${v.video_id}`,
+            })),
+          };
+        }
         break;
       }
 
@@ -193,18 +275,7 @@ export class ContextBuilder {
    * Formats the prompt and strict instructions for the LLM.
    */
   buildPrompt(evidence: EvidenceObject): { systemPrompt: string; userPrompt: string } {
-    const systemPrompt = `You are a strict, deterministic TikTok Dataset Analytics Assistant.
-Your task is to explain and interpret the provided deterministic evidence for the user.
-
-STRICT OPERATIONAL RULES:
-1. Ground Truth: The provided Evidence JSON is the ONLY truth. NEVER invent, hallucinate, extrapolate, or guess numbers.
-2. Calculations: All numbers, rates, percentiles, and differences are already calculated for you. Do NOT recalculate or modify them.
-3. Provenance: Cite exact video IDs, usernames, and metrics from the evidence object.
-4. Baseline Context: Never say a metric is "cao" (high) or "thấp" (low) without stating the baseline population and percentile (e.g. "top 10% toàn bộ dataset" or "cao hơn median của kênh").
-5. Correlation vs Causation: If discussing correlations, you MUST explicitly state that correlation does NOT imply causation.
-6. Identify Specific Videos: When answering rankings, top/bottom performers, or max/min questions, you MUST explicitly point out the specific video(s): state the Video ID, Channel (@username), Caption/Description snippet, Key Metrics, and direct link so the user knows exactly which video is being referred to. Never give just a bare number without pointing to the video!
-7. Language: Respond in clear, professional Vietnamese (or English if the user asks in English).
-8. Missing Data: If a video or metric is not found in the evidence, clearly report that it is not present in the completed dataset.`;
+    const systemPrompt = SWAYSEEK_SYSTEM_PROMPT;
 
     const userPrompt = `USER QUESTION:
 ${evidence.question}
