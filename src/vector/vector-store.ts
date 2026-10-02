@@ -11,7 +11,7 @@ import { getDb } from '../storage/database.js';
 
 export interface VectorRecord {
   id: string;
-  entityType: 'comment' | 'video_summary' | 'caption';
+  entityType: 'comment' | 'video_summary' | 'caption' | 'hashtag';
   entityId: string;
   chunkText: string;
   embedding: number[];
@@ -30,7 +30,7 @@ export interface SearchMatch {
 }
 
 export interface VectorSearchOptions {
-  entityType?: 'comment' | 'video_summary' | 'caption';
+  entityType?: 'comment' | 'video_summary' | 'caption' | 'hashtag';
   limit?: number;
   minSimilarity?: number;
   entityId?: string;

@@ -9,7 +9,7 @@
  * - "All comparisons must define comparison populations"
  */
 
-import { getDb, getVideoById } from '../storage/database.js';
+import { getDb, getVideoById, getHashtagPopulationAnalytics, getHashtagIntersectionAnalytics, HashtagPopulationStats } from '../storage/database.js';
 import {
   AggregationType,
   calculateDifference,
@@ -139,6 +139,11 @@ export class AnalyticsEngine {
     if (filters.maxDuration !== undefined) {
       conditions.push('duration <= ?');
       params.push(filters.maxDuration);
+    }
+    if (filters.hashtag) {
+      const cleanTag = filters.hashtag.toLowerCase().replace(/^#/, '').trim();
+      conditions.push('video_id IN (SELECT DISTINCT video_id FROM video_hashtags WHERE hashtag = ?)');
+      params.push(cleanTag);
     }
     if (filters.keyword) {
       conditions.push('(description LIKE ? OR username LIKE ?)');
@@ -923,6 +928,179 @@ export class AnalyticsEngine {
       })),
     };
   }
+
+  /**
+   * Deterministic Hashtag Analytics conforming to update2.md & fix1.md.
+   * Guarantees that COUNT, SUM, AVG, MIN, MAX all share the EXACT same population and source of truth.
+   */
+  getHashtagAnalytics(
+    hashtag: string,
+    operation: AggregationType = 'SUM',
+    metric: SupportedMetric = 'views',
+    filters?: FilterCriteria
+  ): HashtagAnalyticsResult {
+    const cleanTag = hashtag.toLowerCase().replace(/^#/, '').trim();
+    const displayTag = hashtag.startsWith('#') ? hashtag : `#${hashtag}`;
+    const creator = filters?.creator ? normalizeCreatorHandle(filters.creator) : undefined;
+
+    const stats = getHashtagPopulationAnalytics(cleanTag, { creator, sampleLimit: 10 });
+
+    let sumVal = stats.total_views;
+    let avgVal = stats.avg_views;
+    let minVal = stats.min_views;
+    let maxVal = stats.max_views;
+
+    if (metric === 'likes') {
+      sumVal = stats.total_likes;
+      avgVal = stats.avg_likes;
+    } else if (metric === 'shares') {
+      sumVal = stats.total_shares;
+      avgVal = stats.avg_shares;
+    } else if (metric === 'comments') {
+      sumVal = stats.total_comments;
+      avgVal = stats.avg_comments;
+    }
+
+    return {
+      operation,
+      metric,
+      population: {
+        count: stats.video_count,
+        scope: stats.scope,
+        filters: {
+          hashtag: cleanTag,
+          normalized_tag: stats.normalized_tag,
+          display_tag: stats.display_tag || displayTag,
+          creator: stats.creator,
+        },
+      },
+      aggregation: {
+        count: stats.video_count,
+        sum: sumVal,
+        avg: avgVal,
+        min: minVal,
+        max: maxVal,
+      },
+      sample_videos: stats.sample_videos,
+      entity_ids: stats.entity_ids,
+      source: 'sqlite',
+    };
+  }
+
+  /**
+   * Evaluates deterministic metrics for videos matching ALL specified hashtags simultaneously (intersection).
+   */
+  getHashtagIntersection(
+    hashtags: string[],
+    operation: AggregationType = 'COUNT',
+    metric: SupportedMetric = 'views',
+    filters?: FilterCriteria
+  ): HashtagAnalyticsResult {
+    const creator = filters?.creator ? normalizeCreatorHandle(filters.creator) : undefined;
+    const stats = getHashtagIntersectionAnalytics(hashtags, { creator, sampleLimit: 10 });
+
+    let sumVal = stats.total_views;
+    let avgVal = stats.avg_views;
+    let minVal = stats.min_views;
+    let maxVal = stats.max_views;
+
+    if (metric === 'likes') {
+      sumVal = stats.total_likes;
+      avgVal = stats.avg_likes;
+    } else if (metric === 'shares') {
+      sumVal = stats.total_shares;
+      avgVal = stats.avg_shares;
+    } else if (metric === 'comments') {
+      sumVal = stats.total_comments;
+      avgVal = stats.avg_comments;
+    }
+
+    return {
+      operation,
+      metric,
+      population: {
+        count: stats.video_count,
+        scope: stats.scope,
+        filters: {
+          hashtag: stats.normalized_tag,
+          normalized_tag: stats.normalized_tag,
+          display_tag: stats.display_tag,
+          creator: stats.creator,
+        },
+      },
+      aggregation: {
+        count: stats.video_count,
+        sum: sumVal,
+        avg: avgVal,
+        min: minVal,
+        max: maxVal,
+      },
+      sample_videos: stats.sample_videos,
+      entity_ids: stats.entity_ids,
+      source: 'sqlite',
+    };
+  }
+
+  /**
+   * Deterministic side-by-side comparison between two hashtags across complete populations.
+   */
+  compareHashtags(
+    hashtag1: string,
+    hashtag2: string,
+    metric: SupportedMetric = 'views',
+    filters?: FilterCriteria
+  ) {
+    const s1 = this.getHashtagAnalytics(hashtag1, 'SUM', metric, filters);
+    const s2 = this.getHashtagAnalytics(hashtag2, 'SUM', metric, filters);
+
+    const sum1 = s1.aggregation.sum;
+    const sum2 = s2.aggregation.sum;
+    const count1 = s1.population.count;
+    const count2 = s2.population.count;
+    const avg1 = s1.aggregation.avg;
+    const avg2 = s2.aggregation.avg;
+
+    const diffViews = sum1 - sum2;
+    const diffCount = count1 - count2;
+    const diffAvg = avg1 - avg2;
+
+    return {
+      tag1: s1,
+      tag2: s2,
+      diff_views: diffViews,
+      diff_count: diffCount,
+      diff_avg: diffAvg,
+      views_ratio: sum2 > 0 ? Number((sum1 / sum2).toFixed(2)) : null,
+      leader: sum1 >= sum2 ? s1.population.filters.display_tag : s2.population.filters.display_tag,
+    };
+  }
+}
+
+export interface HashtagAnalyticsResult {
+  operation: string;
+  metric: string;
+  population: {
+    count: number;
+    scope: 'DATASET' | 'CREATOR';
+    filters: {
+      hashtag: string;
+      normalized_tag: string;
+      display_tag: string;
+      creator?: string;
+    };
+  };
+  aggregation: {
+    count: number;
+    sum: number;
+    avg: number;
+    min: number;
+    max: number;
+    median?: number;
+  };
+  sample_videos: any[];
+  entity_ids: string[];
+  source: 'sqlite';
 }
 
 export const analyticsEngine = new AnalyticsEngine();
+

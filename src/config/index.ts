@@ -91,4 +91,7 @@ export const config = {
   embeddingBaseUrl: process.env.EMBEDDING_BASE_URL || 'https://api.openai.com/v1',
   embeddingModel: process.env.EMBEDDING_MODEL || 'text-embedding-3-small',
   ragDebug: getEnvBoolean('RAG_DEBUG', false),
+  enableTikwm: getEnvBoolean('ENABLE_TIKWM', true),
+  tikwmRateLimitMs: getEnvNumber('TIKWM_RATE_LIMIT_MS', 1000),
 };
+

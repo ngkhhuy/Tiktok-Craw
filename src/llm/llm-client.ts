@@ -356,8 +356,9 @@ export class OpenAILLMClient implements LLMClient {
             if (item.metric === 'video_id' || item.metric === 'videos') {
               lines.push(`- **${metricName}:** **${Number(item.value).toLocaleString()}** video`);
             } else if (item.aggregation === 'AVG' && item.metric === 'shares') {
+              const valFormatted = item.value !== null ? (typeof item.value === 'number' ? item.value.toFixed(2) : String(item.value)) : 'N/A';
               lines.push(
-                `- **Lượt chia sẻ trung bình mỗi video (Avg Shares) [AVG]:** **${item.value !== null ? Number(item.value).toLocaleString() : 'N/A'}** lượt chia sẻ / video`
+                `- **Lượt chia sẻ trung bình mỗi video (Avg Shares) [AVG]:** **${valFormatted}** lượt chia sẻ / video`
               );
             } else {
               const aggPrefix =
@@ -402,6 +403,186 @@ export class OpenAILLMClient implements LLMClient {
         ca.top_videos.forEach((v: any, idx: number) => {
           lines.push(`${idx + 1}. **\`${v.video_id}\`** - ${v.views.toLocaleString()} views (${v.likes.toLocaleString()} likes): "${v.description?.slice(0, 80)}..."`);
         });
+        break;
+      }
+
+      case 'HASHTAG_ANALYSIS': {
+        const h = metrics.hashtag;
+        if (!h) {
+          lines.push('Không có thông tin về hashtag trong hệ thống.');
+          break;
+        }
+
+        // 1. VIDEO SCOPE
+        if (h.scope === 'VIDEO') {
+          if (h.status === 'REJECT_EVIDENCE') {
+            lines.push(`Không có đủ dữ liệu hashtag cho video ${h.video_id} để trả lời câu hỏi này.`);
+            break;
+          }
+          if (h.status === 'VIDEO_NOT_FOUND') {
+            lines.push(`Không có đủ dữ liệu hashtag cho video ${h.video_id} để trả lời câu hỏi này (video không tồn tại trong tập dữ liệu).`);
+            break;
+          }
+          if (h.status === 'NO_VIDEO_LEVEL_DATA') {
+            lines.push(`Không có đủ dữ liệu hashtag cho video ${h.video_id} để trả lời câu hỏi này.`);
+            break;
+          }
+          if (h.status === 'NO_HASHTAGS_IN_VIDEO') {
+            lines.push(`Video \`${h.video_id}\`${h.username ? ` của kênh @${h.username}` : ''} có dữ liệu mô tả nhưng không sử dụng hashtag nào.`);
+            break;
+          }
+          if (h.status === 'SUCCESS' && h.hashtags) {
+            lines.push(`### 🏷️ Danh sách Hashtag của video \`${h.video_id}\`${h.username ? ` (@${h.username})` : ''}`);
+            lines.push(`- **Số lượng hashtag:** ${h.total_hashtags || h.hashtags.length}`);
+            lines.push('');
+            lines.push('| STT | Hashtag |');
+            lines.push('| :---: | :--- |');
+            h.hashtags.forEach((tagItem: any, idx: number) => {
+              const tagStr = typeof tagItem === 'string' ? tagItem : tagItem.hashtag;
+              lines.push(`| **#${idx + 1}** | **${tagStr.startsWith('#') ? tagStr : '#' + tagStr}** |`);
+            });
+            break;
+          }
+          lines.push(`Không có đủ dữ liệu hashtag cho video ${h.video_id} để trả lời câu hỏi này.`);
+          break;
+        }
+
+        // 2a. HASHTAG COMPARISON
+        if (h.type === 'COMPARISON' && h.comparison) {
+          const c = h.comparison;
+          const t1 = c.tag1;
+          const t2 = c.tag2;
+          const name1 = t1.population.filters.display_tag;
+          const name2 = t2.population.filters.display_tag;
+          const creatorPrefix = h.creator ? ` trên kênh ${h.creator}` : '';
+
+          lines.push(`### ⚖️ So sánh Hashtag: ${name1} vs ${name2}${creatorPrefix}`);
+          lines.push('');
+          lines.push(`| Chỉ số | ${name1} | ${name2} | Chênh lệch |`);
+          lines.push('| :--- | :--- | :--- | :--- |');
+          lines.push(`| **Số lượng video [COUNT]** | ${t1.population.count.toLocaleString()} video | ${t2.population.count.toLocaleString()} video | ${c.diff_count > 0 ? '+' : ''}${c.diff_count.toLocaleString()} |`);
+          lines.push(`| **Tổng lượt xem [SUM]** | ${Number(t1.aggregation.sum).toLocaleString()} | ${Number(t2.aggregation.sum).toLocaleString()} | ${c.diff_views > 0 ? '+' : ''}${c.diff_views.toLocaleString()} |`);
+          lines.push(`| **Lượt xem TB/video [AVG]** | ${Number(t1.aggregation.avg).toLocaleString()} | ${Number(t2.aggregation.avg).toLocaleString()} | ${c.diff_avg > 0 ? '+' : ''}${c.diff_avg.toLocaleString()} |`);
+          lines.push('');
+          lines.push(`- **Hashtag dẫn đầu về lượt xem:** **${c.leader}**${c.views_ratio ? ` (gấp ${c.views_ratio} lần)` : ''}`);
+          break;
+        }
+
+        // 2b. SPECIFIC HASHTAG LOOKUP & AGGREGATION (Handles both dataset & creator scope when queried_tag is present, including intersection)
+        if (h.queried_tag || h.scope === 'SPECIFIC_HASHTAG') {
+          const tagLabel = h.display_tag || h.queried_tag;
+          const count = h.population?.count ?? h.video_count ?? 0;
+          const agg = h.aggregation;
+          const creatorPrefix = h.creator ? ` của kênh ${h.creator}` : '';
+          const metricName =
+            h.metric === 'likes' ? 'lượt thích (Likes)'
+            : h.metric === 'shares' ? 'lượt chia sẻ (Shares)'
+            : h.metric === 'comments' ? 'bình luận (Comments)'
+            : 'lượt xem (Views)';
+
+          lines.push(`### 🏷️ Phân tích Hashtag \`${tagLabel}\`${creatorPrefix}`);
+          lines.push(`- **Số lượng video sử dụng tag [COUNT]:** **${count.toLocaleString()}** video`);
+
+          if (agg) {
+            lines.push(`- **Tổng ${metricName} [SUM]:** **${Number(agg.sum).toLocaleString()}**`);
+            lines.push(`- **${metricName} trung bình / video [AVG]:** **${Number(agg.avg).toLocaleString()}**`);
+            if (agg.min !== undefined && agg.max !== undefined) {
+              lines.push(`- **Dao động (Min - Max):** **${Number(agg.min).toLocaleString()}** - **${Number(agg.max).toLocaleString()}**`);
+            }
+          } else if (h.total_views !== undefined) {
+            lines.push(`- **Tổng lượt xem:** **${Number(h.total_views).toLocaleString()}**`);
+            if (h.avg_views !== undefined) {
+              lines.push(`- **Lượt xem trung bình / video:** **${Number(h.avg_views).toLocaleString()}**`);
+            }
+          }
+
+          if (h.videos && h.videos.length > 0) {
+            lines.push('');
+            lines.push(`#### 🎬 Top ${h.videos.length} video tiêu biểu sử dụng hashtag${creatorPrefix}:`);
+            lines.push('| Hạng | Video ID | Kênh | Lượt xem | Lượt thích | Lượt share |');
+            lines.push('| :---: | :--- | :--- | :--- | :--- | :--- |');
+            h.videos.forEach((v: any, idx: number) => {
+              lines.push(
+                `| **#${idx + 1}** | \`${v.video_id}\` | @${v.username} | ${Number(v.views).toLocaleString()} | ${Number(v.likes).toLocaleString()} | ${Number(v.shares).toLocaleString()} |`
+              );
+            });
+          } else if (count === 0) {
+            lines.push(`*(Chưa có video nào chứa hashtag ${tagLabel}${creatorPrefix} trong cơ sở dữ liệu)*`);
+          }
+          if (h.related_top_tags && h.related_top_tags.length > 0) {
+            lines.push('');
+            lines.push(`- **Hashtag liên quan phổ biến:** ${h.related_top_tags.join(', ')}`);
+          }
+          break;
+        }
+
+        // 3. CREATOR SCOPE (General creator hashtags, e.g. "top hashtag của @khoailangthang", "có bao nhiêu hashtag?")
+        if (h.scope === 'CREATOR') {
+          if (h.status === 'NO_CREATOR_HASHTAGS' || !h.top_hashtags || h.top_hashtags.length === 0) {
+            lines.push(`Kênh ${h.creator} không có dữ liệu hashtag nào trong các video đã cào.`);
+            break;
+          }
+
+          if (h.is_count_query) {
+            lines.push(`### 🏷️ Thống kê số lượng Hashtag của kênh ${h.creator}`);
+            lines.push(`- **Tổng số hashtag độc nhất (Unique Hashtags):** **${Number(h.total_unique_hashtags).toLocaleString()}** hashtag`);
+            if (h.total_hashtag_usages) {
+              lines.push(`- **Tổng số lượt sử dụng hashtag (Total Usages):** **${Number(h.total_hashtag_usages).toLocaleString()}** lượt`);
+            }
+            if (h.videos_with_hashtags) {
+              lines.push(`- **Số lượng video có gắn hashtag:** **${Number(h.videos_with_hashtags).toLocaleString()}** video`);
+            }
+            lines.push('');
+            lines.push(`#### Top ${h.top_hashtags.length} hashtag được sử dụng nhiều nhất:`);
+          } else {
+            lines.push(`### 🏷️ Top Hashtag của kênh ${h.creator}`);
+            lines.push(`- **Tổng số hashtag độc nhất ghi nhận:** **${Number(h.total_unique_hashtags).toLocaleString()}** hashtag`);
+            if (h.videos_with_hashtags) {
+              lines.push(`- **Số lượng video có gắn hashtag:** **${Number(h.videos_with_hashtags).toLocaleString()}** video`);
+            }
+            lines.push('');
+          }
+
+          lines.push('| Hạng | Hashtag | Số video | Tổng lượt xem | Lượt xem TB/video |');
+          lines.push('| :---: | :--- | :--- | :--- | :--- |');
+          h.top_hashtags.forEach((t: any, idx: number) => {
+            lines.push(
+              `| **#${idx + 1}** | **#${t.hashtag}** | ${t.video_count} | ${Number(t.total_views).toLocaleString()} | ${Number(Math.round(t.avg_views || 0)).toLocaleString()} |`
+            );
+          });
+          break;
+        }
+
+        // 4. DATASET SCOPE
+        if (h.top_hashtags) {
+          if (h.is_count_query) {
+            lines.push(`### 🏷️ Thống kê số lượng Hashtag toàn bộ Dataset`);
+            lines.push(`- **Tổng số hashtag độc nhất (Unique Hashtags):** **${Number(h.total_unique_hashtags).toLocaleString()}** hashtag`);
+            if (h.total_hashtag_usages) {
+              lines.push(`- **Tổng số lượt sử dụng hashtag (Total Usages):** **${Number(h.total_hashtag_usages).toLocaleString()}** lượt`);
+            }
+            if (h.videos_with_hashtags) {
+              lines.push(`- **Số lượng video có gắn hashtag:** **${Number(h.videos_with_hashtags).toLocaleString()}** video`);
+            }
+            lines.push('');
+            lines.push(`#### Top ${h.top_hashtags.length} hashtag phổ biến nhất:`);
+          } else {
+            lines.push(`### 🏷️ Top Hashtag phổ biến nhất (toàn bộ dataset)`);
+            if (h.total_unique_hashtags) {
+              lines.push(`- **Tổng số hashtag độc nhất ghi nhận:** **${Number(h.total_unique_hashtags).toLocaleString()}** hashtag`);
+            }
+            lines.push('');
+          }
+          lines.push('| Hạng | Hashtag | Số video | Tổng lượt xem | Lượt xem TB/video | Top Creators |');
+          lines.push('| :---: | :--- | :--- | :--- | :--- | :--- |');
+          h.top_hashtags.forEach((t: any, idx: number) => {
+            const creators = t.top_creators && t.top_creators.length > 0 ? t.top_creators.map((c: string) => `@${c}`).join(', ') : 'N/A';
+            lines.push(
+              `| **#${idx + 1}** | **#${t.hashtag}** | ${t.video_count} | ${Number(t.total_views).toLocaleString()} | ${Number(Math.round(t.avg_views || 0)).toLocaleString()} | ${creators} |`
+            );
+          });
+          break;
+        }
         break;
       }
 

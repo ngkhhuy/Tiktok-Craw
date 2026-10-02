@@ -51,6 +51,7 @@ export interface CrawlJob {
 }
 
 export const activeJobs = new Map<string, CrawlJob>();
+export const resolvedProfilesCache = new Map<string, any>();
 
 export function getProfileViews(profileId: string): number {
   let total = 0;
@@ -209,6 +210,9 @@ export function createServer(port: number = 3000) {
     console.warn('[INDEX] Note on DB initialization:', err.message);
   }
 
+  // Pre-warm browser in the background to eliminate cold start on first user crawl
+  tiktokAcquisition.prewarmBrowser().catch(() => {});
+
   const server = http.createServer(async (req, res) => {
     const parsedUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     const pathname = parsedUrl.pathname;
@@ -261,6 +265,10 @@ export function createServer(port: number = 3000) {
         username = username.split('/')[0].split('?')[0];
 
         const profile = await tiktokAcquisition.getProfile(username);
+        resolvedProfilesCache.set(username.toLowerCase(), profile);
+        if (profile.username) {
+          resolvedProfilesCache.set(profile.username.toLowerCase(), profile);
+        }
         const profileId = profile.profile_id;
         const existingViews = getProfileViews(profileId);
 
@@ -293,6 +301,14 @@ export function createServer(port: number = 3000) {
         res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ error: err.message || 'Không thể tìm thấy thông tin kênh TikTok' }));
       }
+      return;
+    }
+
+    // 0.04 API: /api/prewarm (Warm up Playwright browser context in background)
+    if (req.method === 'POST' && pathname === '/api/prewarm') {
+      tiktokAcquisition.prewarmBrowser().catch(() => {});
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ success: true }));
       return;
     }
 
@@ -360,10 +376,12 @@ export function createServer(port: number = 3000) {
               cleanUsername = cleanUsername.split('/')[0].split('?')[0];
 
               const pUrl = `https://www.tiktok.com/@${cleanUsername}`;
+              const cachedProfile = resolvedProfilesCache.get(cleanUsername.toLowerCase());
 
               await profileCrawler.crawl(pUrl, {
                 limit: limit || 1000,
                 concurrency,
+                profile: cachedProfile,
                 signal: abortController.signal,
                 onProgress: (evt) => {
                   if (job.status === 'stopped') return;

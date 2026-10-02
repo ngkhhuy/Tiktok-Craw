@@ -6,6 +6,19 @@ export function parseTikTokUrl(inputUrl: string): ParsedTikTokUrl {
   }
 
   const trimmed = inputUrl.trim();
+
+  // Support @username handle directly (e.g. @lap_trinh_vn)
+  const handleMatch = trimmed.match(/^@([a-zA-Z0-9_.-]+)$/);
+  if (handleMatch) {
+    const username = handleMatch[1];
+    return {
+      type: 'profile',
+      rawUrl: trimmed,
+      canonicalUrl: `https://www.tiktok.com/@${username}`,
+      username,
+    };
+  }
+
   let urlObj: URL;
   try {
     urlObj = new URL(trimmed);

@@ -31,6 +31,41 @@ export class QueryPlanner {
       execution_steps.push('Compute dataset-wide baseline benchmarks');
       explanation = 'Overview of total videos, profiles, comments, and views in database.';
     }
+    // 1b. Hashtag Analysis Queries — must be before RANKING/AGGREGATION to avoid false routing
+    else if (entities.isHashtagQuery || entities.hashtag || (entities.hashtags && entities.hashtags.length > 0)) {
+      intent = 'HASHTAG_ANALYSIS';
+      if (entities.videoIds.length > 0) {
+        // STRICT VIDEO SCOPE GUARD
+        const vid = entities.videoIds[0];
+        execution_steps.push(`Execute getVideoHashtags('${vid}')`);
+        explanation = `Hashtag analysis strictly scoped to video ${vid}. Evidence from other videos/creators/dataset is forbidden.`;
+      } else if (entities.isHashtagComparison && entities.hashtags && entities.hashtags.length >= 2) {
+        const tag1 = entities.hashtags[0];
+        const tag2 = entities.hashtags[1];
+        execution_steps.push(`Execute analyticsEngine.compareHashtags('#${tag1}', '#${tag2}')`);
+        explanation = `Side-by-side deterministic comparison between #${tag1} and #${tag2}.`;
+      } else if (entities.isHashtagIntersection && entities.hashtags && entities.hashtags.length >= 2) {
+        const op = entities.aggregation || 'COUNT';
+        const metric = entities.metrics[0] || 'views';
+        const tags = entities.hashtags.map((t) => `#${t}`).join(', ');
+        execution_steps.push(`Execute analyticsEngine.getHashtagIntersection([${tags}], '${op}', '${metric}')`);
+        explanation = `Deterministic hashtag intersection analysis for videos containing all of [${tags}].`;
+      } else if (entities.hashtag) {
+        const op = entities.aggregation || 'SUM';
+        const metric = entities.metrics[0] || 'views';
+        execution_steps.push(`Execute analyticsEngine.getHashtagAnalytics('#${entities.hashtag}', '${op}', '${metric}')`);
+        explanation = `Hashtag analysis for #${entities.hashtag}${entities.creator ? ` within @${entities.creator}` : ''} with deterministic aggregation [${op}].`;
+      } else if (entities.creator) {
+        // STRICT CREATOR SCOPE
+        execution_steps.push(`Execute getCreatorHashtags('@${entities.creator}', ${entities.limit})`);
+        explanation = `Top ${entities.limit} hashtags strictly scoped to creator @${entities.creator}. Evidence from other creators/dataset is forbidden.`;
+      } else {
+        // GLOBAL DATASET SCOPE
+        const metric = entities.metrics[0] === 'likes' ? 'likes' : entities.metrics[0] === 'shares' ? 'shares' : 'views';
+        execution_steps.push(`Execute getTopHashtags('${metric}', ${entities.limit})`);
+        explanation = `Top ${entities.limit} hashtags by ${metric} across global dataset.`;
+      }
+    }
     // 2. Correlation Queries
     // STRICT RULE: Only classify as CORRELATION when user genuinely asks about correlation, relationships, or causation.
     // NEVER deduce: 2 metrics → CORRELATION!

@@ -1,5 +1,5 @@
 import path from 'path';
-import { tiktokAcquisition } from '../acquisition/tiktok/index.js';
+import { tiktokAcquisition, NormalizedTikTokProfile, DiscoveredVideoReference } from '../acquisition/tiktok/index.js';
 import { videoCrawler } from './video-crawler.js';
 import { localStorage } from '../storage/local-storage.js';
 import {
@@ -35,6 +35,7 @@ export interface ProfileCrawlerOptions {
   force?: boolean;
   onProgress?: (event: ProfileProgressEvent) => void;
   signal?: AbortSignal;
+  profile?: NormalizedTikTokProfile;
 }
 
 export class ProfileCrawler {
@@ -70,7 +71,7 @@ export class ProfileCrawler {
     options.onProgress?.({ stage: 'resolving', videoTitle: `@${username}` });
 
     // 1. Resolve Profile Details
-    const profile = await tiktokAcquisition.getProfile(username);
+    const profile = options.profile || (await tiktokAcquisition.getProfile(username));
     const profileId = profile.profile_id;
     const profileDir = localStorage.getProfileDir(profileId);
     await localStorage.ensureDir(profileDir);
@@ -99,59 +100,50 @@ export class ProfileCrawler {
       logger.warn(`Failed to index profile @${username} into SQLite: ${e.message}`);
     }
 
+    const targetTotal = (limit && limit > 0)
+      ? Math.min(limit, profile.stats.videos > 0 ? profile.stats.videos : limit)
+      : (profile.stats.videos || 20);
+
     options.onProgress?.({
       stage: 'discovering',
-      total: profile.stats.videos,
+      total: targetTotal,
       videoTitle: profile.display_name || `@${username}`,
     });
 
-    // 2. Discover Profile Videos
-    const discovery = await tiktokAcquisition.discoverVideos(profile, limit);
-
-    // Save videos.json
-    const videosFile = path.join(profileDir, 'videos.json');
-    await localStorage.writeJson(videosFile, discovery);
-    logger.stage('discover', `Saved ${discovery.videos.length} discovered videos to ${videosFile}`);
-
-    console.log(`[DISCOVER] ${discovery.videos.length} videos discovered (method: ${discovery.method})`);
-
-    // 3. Initialize / Load crawl-manifest.json
+    // 2. Initialize / Load crawl-manifest.json
     const crawlManifest = await initProfileCrawlManifest(
       profileId,
       username,
       profile.profile_url,
-      discovery.videos.length
+      targetTotal
     );
 
-    // 4. Process Videos with Concurrency Limiter
+    // 3. Process Videos with Streaming Concurrency Limiter
     const limiter = new ConcurrencyLimiter(concurrency);
-    const total = discovery.videos.length;
+    const allDownloadTasks: Promise<void>[] = [];
+    const queuedVideoIds = new Set<string>();
 
     let completedCount = 0;
     let skippedCount = 0;
     let failedCount = 0;
 
-    options.onProgress?.({
-      stage: 'downloading',
-      current: 0,
-      total,
-      videoTitle: 'Bắt đầu tải các video...',
-    });
+    const processVideo = (vidRef: DiscoveredVideoReference, index: number) => {
+      if (queuedVideoIds.has(vidRef.video_id)) return;
+      queuedVideoIds.add(vidRef.video_id);
 
-    const tasks = discovery.videos.map((vidRef, index) => {
-      return limiter.run(async () => {
+      const task = limiter.run(async () => {
         if (this.isInterrupted || options.signal?.aborted) {
           return;
         }
 
         const currentNum = index + 1;
         const videoTitle = vidRef.normalized?.content?.description || vidRef.description || vidRef.video_id;
-        console.log(`\n[${currentNum}/${total}] Processing video: ${vidRef.video_id}`);
+        console.log(`\n[${currentNum}/${targetTotal}] Processing video: ${vidRef.video_id}`);
 
         options.onProgress?.({
           stage: 'downloading',
           current: completedCount + skippedCount,
-          total,
+          total: targetTotal,
           videoId: vidRef.video_id,
           videoTitle,
         });
@@ -180,7 +172,7 @@ export class ProfileCrawler {
           options.onProgress?.({
             stage: 'downloading',
             current: completedCount + skippedCount,
-            total,
+            total: targetTotal,
             videoId: vidRef.video_id,
             videoTitle,
             status: result.status,
@@ -195,7 +187,7 @@ export class ProfileCrawler {
           options.onProgress?.({
             stage: 'downloading',
             current: completedCount + skippedCount,
-            total,
+            total: targetTotal,
             videoId: vidRef.video_id,
             videoTitle,
             status: 'failed',
@@ -203,11 +195,32 @@ export class ProfileCrawler {
           });
         }
       });
+
+      allDownloadTasks.push(task);
+    };
+
+    // 4. Live discovery with immediate streaming to workers
+    const discovery = await tiktokAcquisition.discoverVideos(profile, limit, (vidRef, count) => {
+      processVideo(vidRef, count - 1);
     });
 
-    await Promise.all(tasks);
+    // Enqueue any remaining discovered videos that arrived before listener attached
+    discovery.videos.forEach((vidRef, idx) => {
+      processVideo(vidRef, idx);
+    });
 
-    // 5. Finalize Manifest & Print Summary
+    // Save videos.json
+    const videosFile = path.join(profileDir, 'videos.json');
+    await localStorage.writeJson(videosFile, discovery);
+    logger.stage('discover', `Saved ${discovery.videos.length} discovered videos to ${videosFile}`);
+
+    console.log(`[DISCOVER] ${discovery.videos.length} videos discovered (method: ${discovery.method})`);
+
+    // 5. Await all in-flight download tasks
+    await Promise.all(allDownloadTasks);
+
+    // 6. Finalize Manifest & Print Summary
+    const total = discovery.videos.length;
     const isAborted = this.isInterrupted || Boolean(options.signal?.aborted);
     const finalStatus = isAborted ? 'interrupted' : 'completed';
     const finalManifest = await finalizeProfileCrawl(profileId, finalStatus);

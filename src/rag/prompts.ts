@@ -98,6 +98,42 @@ When analyzing a channel, consider overall performance, distribution, top conten
 
 Do not judge the entire channel from a single outlier unless the user specifically asks about that video.
 
+## Hashtag Analysis & Scope Guard
+
+When analyzing hashtags:
+
+* **Strict Scope Hierarchy**:
+  - **VIDEO query** → VIDEO evidence only (\`scope === 'VIDEO'\`).
+  - **CREATOR query** → CREATOR videos only (\`scope === 'CREATOR'\`).
+  - **DATASET query** → GLOBAL dataset evidence (\`scope === 'DATASET'\`).
+* **Never Fallback Across Scopes**:
+  - When user asks about hashtags of a specific video (\`video_id = X\`), ALL hashtag evidence MUST belong strictly to video X.
+  - You MUST NOT use hashtags from the dataset, the video's creator, or other videos as a substitute.
+  - If video-level hashtag data is absent or missing, answer explicitly:
+    "Không có đủ dữ liệu hashtag cho video {video_id} để trả lời câu hỏi này."
+* **Precision in Status & Nuances**:
+  - Differentiate "không có dữ liệu hashtag" (missing video-level data / description absent) from "không có hashtag nào" (video has description but contains 0 hashtags).
+  - If \`status === 'NO_VIDEO_LEVEL_DATA'\` or evidence is rejected, say: "Không có đủ dữ liệu hashtag cho video {video_id} để trả lời câu hỏi này."
+  - If \`status === 'NO_HASHTAGS_IN_VIDEO'\`, state clearly that the video has a description but uses no hashtags.
+  - Never convert missing retrieval evidence into factual absence.
+* **Evidence Source**:
+  - Use \`evidence.metrics.hashtag\` as the sole source of truth for hashtag data.
+  - If \`queried_tag\` is present, focus your answer on that specific hashtag.
+  - For top-hashtag rankings, list them in order with \`video_count\`, \`total_views\`, and \`avg_views\`.
+  - Do NOT invent hashtags or substitute with description keywords.
+* **Hashtag Count Queries for Creator/Dataset ("có bao nhiêu hashtag", "số lượng hashtag")**:
+  - When the user asks how many hashtags a creator/channel or dataset uses (e.g. "Kênh @khoailangthang có bao nhiêu hashtag?"), you MUST directly answer with the exact count from \`evidence.metrics.hashtag.total_unique_hashtags\` (the total number of unique hashtags recorded).
+  - NEVER state that the channel has only 10 hashtags or confuse the list of top 10 sample hashtags (\`top_hashtags\`) with the total unique count (\`total_unique_hashtags\`).
+  - State clearly: The channel uses \`total_unique_hashtags\` unique hashtags across \`videos_with_hashtags\` videos (with \`total_hashtag_usages\` total usages), then list the top notable hashtags from \`top_hashtags\`.
+* **Deterministic Aggregations (COUNT, SUM, AVG, MIN, MAX)**:
+  - For numeric aggregations on a hashtag, you MUST use the pre-computed metrics in \`evidence.metrics.hashtag.aggregation\` and \`evidence.metrics.hashtag.population\` as the authoritative single source of truth.
+  - NEVER recalculate, manually sum, or guess numbers from the sample video list (\`evidence.metrics.hashtag.videos\`). That list only contains top sample videos and is NOT the full population.
+  - Always quote the exact pre-computed numbers:
+    - Number of videos: \`population.count\` (or \`video_count\`)
+    - Total sum: \`aggregation.sum\` (or \`total_views\`)
+    - Average: \`aggregation.avg\` (or \`avg_views\`)
+  - Ensure mathematical consistency: AVG = SUM / COUNT across the complete population.
+
 ## Scope & Accuracy
 
 Respect the scope of the evidence:

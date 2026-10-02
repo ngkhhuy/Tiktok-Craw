@@ -134,6 +134,25 @@ function initSchema(db: Database.Database): void {
     );
 
     CREATE INDEX IF NOT EXISTS idx_embeddings_entity ON vector_embeddings(entity_type, entity_id);
+
+    -- Hashtag lookup table: one row per (video, hashtag) occurrence
+    CREATE TABLE IF NOT EXISTS video_hashtags (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      video_id TEXT NOT NULL,
+      username TEXT NOT NULL,
+      hashtag TEXT NOT NULL,
+      position INTEGER DEFAULT 0,
+      views INTEGER DEFAULT 0,
+      likes INTEGER DEFAULT 0,
+      comments_count INTEGER DEFAULT 0,
+      shares INTEGER DEFAULT 0,
+      published_at TEXT,
+      UNIQUE(video_id, hashtag)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_hashtags_tag ON video_hashtags(hashtag);
+    CREATE INDEX IF NOT EXISTS idx_hashtags_video ON video_hashtags(video_id);
+    CREATE INDEX IF NOT EXISTS idx_hashtags_username ON video_hashtags(username);
   `);
 }
 
@@ -233,6 +252,37 @@ export function upsertVideo(record: VideoRecord): void {
     created_at: now,
     updated_at: now,
   });
+
+  // Auto-sync hashtags if description is present
+  if (record.description && record.video_id) {
+    const tags = parseHashtags(record.description);
+    if (tags.length > 0) {
+      const hStmt = db.prepare(`
+        INSERT INTO video_hashtags (video_id, username, hashtag, position, views, likes, comments_count, shares, published_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(video_id, hashtag) DO UPDATE SET
+          views = excluded.views,
+          likes = excluded.likes,
+          comments_count = excluded.comments_count,
+          shares = excluded.shares,
+          username = excluded.username,
+          published_at = excluded.published_at
+      `);
+      for (let pos = 0; pos < tags.length; pos++) {
+        hStmt.run(
+          record.video_id,
+          record.username || '',
+          tags[pos],
+          pos,
+          record.views || 0,
+          record.likes || 0,
+          record.comments_count || 0,
+          record.shares || 0,
+          record.published_at || null
+        );
+      }
+    }
+  }
 }
 
 // ─── Profile CRUD ────────────────────────────────────────────
@@ -1171,5 +1221,531 @@ export function closeDb(): void {
     _db.close();
     _db = null;
   }
+}
+
+// ─── Hashtag CRUD & Analytics ─────────────────────────────────
+
+/**
+ * Parses hashtags from a TikTok video description string.
+ * Returns an array of lowercase hashtag strings (without the # prefix) in order of appearance.
+ */
+export function parseHashtags(description: string): string[] {
+  if (!description) return [];
+  const matches = description.matchAll(/#([^\s#\u200b\u200c\u200d\ufeff.,!?;:)([\]{}'"]+)/gu);
+  const tags: string[] = [];
+  const seen = new Set<string>();
+  for (const m of matches) {
+    const tag = m[1].toLowerCase().trim();
+    if (tag && tag.length >= 2 && !seen.has(tag)) {
+      seen.add(tag);
+      tags.push(tag);
+    }
+  }
+  return tags;
+}
+
+/**
+ * Populates video_hashtags from all completed videos. Safe to re-run (UPSERT).
+ * Returns the number of (video, hashtag) rows inserted/updated.
+ */
+export function syncAllHashtags(): number {
+  const db = getDb();
+  const videos = db.prepare(
+    "SELECT video_id, username, description, views, likes, comments_count, shares, published_at FROM videos WHERE status = 'completed' AND description IS NOT NULL"
+  ).all() as any[];
+
+  const stmt = db.prepare(`
+    INSERT INTO video_hashtags (video_id, username, hashtag, position, views, likes, comments_count, shares, published_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(video_id, hashtag) DO UPDATE SET
+      views = excluded.views,
+      likes = excluded.likes,
+      comments_count = excluded.comments_count,
+      shares = excluded.shares
+  `);
+
+  let total = 0;
+  const run = db.transaction(() => {
+    for (const v of videos) {
+      const tags = parseHashtags(v.description || '');
+      tags.forEach((tag, pos) => {
+        stmt.run(v.video_id, v.username || '', tag, pos, v.views || 0, v.likes || 0, v.comments_count || 0, v.shares || 0, v.published_at || null);
+        total++;
+      });
+    }
+  });
+  run();
+  return total;
+}
+
+export interface HashtagStats {
+  hashtag: string;
+  video_count: number;
+  total_views: number;
+  total_likes: number;
+  total_shares: number;
+  avg_views: number;
+  avg_engagement_rate: number;
+  top_creators: string[];
+}
+
+/**
+ * Returns top N hashtags by total views (or video_count if metric='count').
+ * Optionally filtered by creator username.
+ */
+export function getTopHashtags(
+  metric: 'views' | 'video_count' | 'likes' | 'shares' = 'views',
+  limit: number = 10,
+  creatorFilter?: string
+): HashtagStats[] {
+  const db = getDb();
+  const whereClause = creatorFilter ? 'WHERE username = ?' : '';
+  const params: any[] = creatorFilter ? [creatorFilter] : [];
+
+  const orderCol =
+    metric === 'video_count' ? 'video_count'
+    : metric === 'likes' ? 'total_likes'
+    : metric === 'shares' ? 'total_shares'
+    : 'total_views';
+
+  const rows = db.prepare(`
+    SELECT
+      hashtag,
+      COUNT(*) as video_count,
+      SUM(views) as total_views,
+      SUM(likes) as total_likes,
+      SUM(shares) as total_shares,
+      AVG(views) as avg_views,
+      GROUP_CONCAT(DISTINCT username) as creators_csv
+    FROM video_hashtags
+    ${whereClause}
+    GROUP BY hashtag
+    ORDER BY ${orderCol} DESC
+    LIMIT ?
+  `).all(...params, limit) as any[];
+
+  return rows.map((r) => {
+    const topCreators = (r.creators_csv || '').split(',').filter(Boolean).slice(0, 3);
+    const avgEngagement = r.total_views > 0
+      ? ((r.total_likes || 0) + (r.total_shares || 0)) / r.total_views
+      : 0;
+    return {
+      hashtag: r.hashtag,
+      video_count: Number(r.video_count || 0),
+      total_views: Number(r.total_views || 0),
+      total_likes: Number(r.total_likes || 0),
+      total_shares: Number(r.total_shares || 0),
+      avg_views: Number(r.avg_views || 0),
+      avg_engagement_rate: avgEngagement,
+      top_creators: topCreators,
+    };
+  });
+}
+
+export interface HashtagPopulationStats {
+  hashtag: string;
+  normalized_tag: string;
+  display_tag: string;
+  scope: 'DATASET' | 'CREATOR';
+  creator?: string;
+  video_count: number;
+  total_views: number;
+  avg_views: number;
+  min_views: number;
+  max_views: number;
+  total_likes: number;
+  avg_likes: number;
+  total_comments: number;
+  avg_comments: number;
+  total_shares: number;
+  avg_shares: number;
+  sample_videos: {
+    video_id: string;
+    username: string;
+    views: number;
+    likes: number;
+    shares: number;
+    comments_count: number;
+    published_at: string | null;
+  }[];
+  entity_ids: string[];
+}
+
+/**
+ * Returns deterministic aggregation across the ENTIRE population of completed videos using a hashtag.
+ * Deduplicates by video_id to prevent duplicate JOIN contamination.
+ * Calculates COUNT, SUM, AVG, MIN, MAX in a single atomic query from the exact same population.
+ */
+export function getHashtagPopulationAnalytics(
+  hashtag: string,
+  options?: { creator?: string; sampleLimit?: number }
+): HashtagPopulationStats {
+  const db = getDb();
+  const normalized = hashtag.toLowerCase().replace(/^#/, '').trim();
+  const displayTag = hashtag.startsWith('#') ? hashtag : `#${hashtag}`;
+  const cleanCreator = options?.creator ? options.creator.toLowerCase().replace(/^@/, '').trim() : undefined;
+  const sampleLimit = options?.sampleLimit ?? 10;
+
+  const creatorFilter = cleanCreator ? 'AND v.username = ?' : '';
+  const params: any[] = [normalized];
+  if (cleanCreator) params.push(cleanCreator);
+
+  // 1. Single authoritative aggregation query on deduplicated matching videos
+  const aggSql = `
+    SELECT 
+      COUNT(DISTINCT v.video_id) as video_count,
+      COALESCE(SUM(v.views), 0) as total_views,
+      COALESCE(MIN(v.views), 0) as min_views,
+      COALESCE(MAX(v.views), 0) as max_views,
+      COALESCE(SUM(v.likes), 0) as total_likes,
+      COALESCE(SUM(v.comments_count), 0) as total_comments,
+      COALESCE(SUM(v.shares), 0) as total_shares
+    FROM videos v
+    INNER JOIN (
+      SELECT DISTINCT video_id 
+      FROM video_hashtags 
+      WHERE hashtag = ?
+    ) vh ON v.video_id = vh.video_id
+    WHERE v.status = 'completed'
+    ${creatorFilter}
+  `;
+
+  const aggRow = db.prepare(aggSql).get(...params) as any;
+  const count = Number(aggRow?.video_count || 0);
+  const totalViews = Number(aggRow?.total_views || 0);
+  const avgViews = count > 0 ? Number((totalViews / count).toFixed(2)) : 0;
+  const totalLikes = Number(aggRow?.total_likes || 0);
+  const avgLikes = count > 0 ? Number((totalLikes / count).toFixed(2)) : 0;
+  const totalComments = Number(aggRow?.total_comments || 0);
+  const avgComments = count > 0 ? Number((totalComments / count).toFixed(2)) : 0;
+  const totalShares = Number(aggRow?.total_shares || 0);
+  const avgShares = count > 0 ? Number((totalShares / count).toFixed(2)) : 0;
+
+  // 2. Fetch top sample videos from the EXACT SAME population for presentation
+  const sampleSql = `
+    SELECT 
+      v.video_id, v.username, v.views, v.likes, v.shares, v.comments_count, v.published_at
+    FROM videos v
+    INNER JOIN (
+      SELECT DISTINCT video_id 
+      FROM video_hashtags 
+      WHERE hashtag = ?
+    ) vh ON v.video_id = vh.video_id
+    WHERE v.status = 'completed'
+    ${creatorFilter}
+    ORDER BY v.views DESC
+    LIMIT ?
+  `;
+
+  const sampleRows = db.prepare(sampleSql).all(...params, sampleLimit) as any[];
+
+  // 3. Fetch all matching video_ids for evidence provenance
+  const idSql = `
+    SELECT DISTINCT v.video_id
+    FROM videos v
+    INNER JOIN (
+      SELECT DISTINCT video_id 
+      FROM video_hashtags 
+      WHERE hashtag = ?
+    ) vh ON v.video_id = vh.video_id
+    WHERE v.status = 'completed'
+    ${creatorFilter}
+  `;
+  const idRows = db.prepare(idSql).all(...params) as any[];
+
+  return {
+    hashtag: normalized,
+    normalized_tag: normalized,
+    display_tag: displayTag,
+    scope: cleanCreator ? 'CREATOR' : 'DATASET',
+    creator: cleanCreator,
+    video_count: count,
+    total_views: totalViews,
+    avg_views: avgViews,
+    min_views: Number(aggRow?.min_views || 0),
+    max_views: Number(aggRow?.max_views || 0),
+    total_likes: totalLikes,
+    avg_likes: avgLikes,
+    total_comments: totalComments,
+    avg_comments: avgComments,
+    total_shares: totalShares,
+    avg_shares: avgShares,
+    sample_videos: sampleRows.map((r) => ({
+      video_id: r.video_id,
+      username: r.username,
+      views: Number(r.views || 0),
+      likes: Number(r.likes || 0),
+      shares: Number(r.shares || 0),
+      comments_count: Number(r.comments_count || 0),
+      published_at: r.published_at || null,
+    })),
+    entity_ids: idRows.map((r) => r.video_id),
+  };
+}
+
+/**
+ * Returns deterministic aggregation across the ENTIRE population of completed videos that use ALL of the specified hashtags simultaneously (intersection).
+ * Deduplicates by video_id to prevent duplicate JOIN contamination.
+ */
+export function getHashtagIntersectionAnalytics(
+  hashtags: string[],
+  options?: { creator?: string; sampleLimit?: number }
+): HashtagPopulationStats {
+  const db = getDb();
+  const cleanTags = hashtags.map((t) => t.toLowerCase().replace(/^#/, '').trim()).filter(Boolean);
+  const displayTag = cleanTags.map((t) => `#${t}`).join(' ∩ ');
+  const cleanCreator = options?.creator ? options.creator.toLowerCase().replace(/^@/, '').trim() : undefined;
+  const sampleLimit = options?.sampleLimit ?? 10;
+
+  const creatorFilter = cleanCreator ? 'AND v.username = ?' : '';
+  const params: any[] = [];
+  if (cleanCreator) params.push(cleanCreator);
+
+  // Build intersection clause: v.video_id IN (SELECT video_id FROM video_hashtags WHERE hashtag = ?) for each tag
+  const intersectClauses = cleanTags
+    .map((tag) => {
+      params.push(tag);
+      return 'AND v.video_id IN (SELECT DISTINCT video_id FROM video_hashtags WHERE hashtag = ?)';
+    })
+    .join('\n');
+
+  const aggSql = `
+    SELECT 
+      COUNT(DISTINCT v.video_id) as video_count,
+      COALESCE(SUM(v.views), 0) as total_views,
+      COALESCE(MIN(v.views), 0) as min_views,
+      COALESCE(MAX(v.views), 0) as max_views,
+      COALESCE(SUM(v.likes), 0) as total_likes,
+      COALESCE(SUM(v.comments_count), 0) as total_comments,
+      COALESCE(SUM(v.shares), 0) as total_shares
+    FROM videos v
+    WHERE v.status = 'completed'
+    ${creatorFilter}
+    ${intersectClauses}
+  `;
+
+  const aggRow = db.prepare(aggSql).get(...params) as any;
+  const count = Number(aggRow?.video_count || 0);
+  const totalViews = Number(aggRow?.total_views || 0);
+  const avgViews = count > 0 ? Number((totalViews / count).toFixed(2)) : 0;
+  const totalLikes = Number(aggRow?.total_likes || 0);
+  const avgLikes = count > 0 ? Number((totalLikes / count).toFixed(2)) : 0;
+  const totalComments = Number(aggRow?.total_comments || 0);
+  const avgComments = count > 0 ? Number((totalComments / count).toFixed(2)) : 0;
+  const totalShares = Number(aggRow?.total_shares || 0);
+  const avgShares = count > 0 ? Number((totalShares / count).toFixed(2)) : 0;
+
+  const sampleSql = `
+    SELECT 
+      v.video_id, v.username, v.views, v.likes, v.shares, v.comments_count, v.published_at
+    FROM videos v
+    WHERE v.status = 'completed'
+    ${creatorFilter}
+    ${intersectClauses}
+    ORDER BY v.views DESC
+    LIMIT ?
+  `;
+  const sampleRows = db.prepare(sampleSql).all(...params, sampleLimit) as any[];
+
+  const idSql = `
+    SELECT DISTINCT v.video_id
+    FROM videos v
+    WHERE v.status = 'completed'
+    ${creatorFilter}
+    ${intersectClauses}
+  `;
+  const idRows = db.prepare(idSql).all(...params) as any[];
+
+  return {
+    hashtag: cleanTags.join('+'),
+    normalized_tag: cleanTags.join('+'),
+    display_tag: displayTag,
+    scope: cleanCreator ? 'CREATOR' : 'DATASET',
+    creator: cleanCreator,
+    video_count: count,
+    total_views: totalViews,
+    avg_views: avgViews,
+    min_views: Number(aggRow?.min_views || 0),
+    max_views: Number(aggRow?.max_views || 0),
+    total_likes: totalLikes,
+    avg_likes: avgLikes,
+    total_comments: totalComments,
+    avg_comments: avgComments,
+    total_shares: totalShares,
+    avg_shares: avgShares,
+    sample_videos: sampleRows.map((r) => ({
+      video_id: r.video_id,
+      username: r.username,
+      views: Number(r.views || 0),
+      likes: Number(r.likes || 0),
+      shares: Number(r.shares || 0),
+      comments_count: Number(r.comments_count || 0),
+      published_at: r.published_at || null,
+    })),
+    entity_ids: idRows.map((r) => r.video_id),
+  };
+}
+
+/**
+ * Returns videos that use a specific hashtag, ordered by views DESC.
+ * Deduplicates by video_id and queries the canonical videos table.
+ */
+export function getVideosByHashtag(
+  hashtag: string,
+  limit: number = 10
+): { video_id: string; username: string; views: number; likes: number; shares: number; published_at: string | null }[] {
+  const db = getDb();
+  const tag = hashtag.toLowerCase().replace(/^#/, '').trim();
+  return db.prepare(`
+    SELECT v.video_id, v.username, v.views, v.likes, v.shares, v.published_at
+    FROM videos v
+    INNER JOIN (
+      SELECT DISTINCT video_id
+      FROM video_hashtags
+      WHERE hashtag = ?
+    ) vh ON v.video_id = vh.video_id
+    WHERE v.status = 'completed'
+    ORDER BY v.views DESC
+    LIMIT ?
+  `).all(tag, limit) as any[];
+}
+
+/**
+ * Returns all hashtags used by a creator, ordered by total views.
+ */
+export function getCreatorHashtags(username: string, limit: number = 20): HashtagStats[] {
+  return getTopHashtags('views', limit, username);
+}
+
+/**
+ * Returns overview statistics of hashtags used by a specific creator.
+ */
+export function getCreatorHashtagOverview(creator: string): {
+  total_unique_hashtags: number;
+  total_hashtag_usages: number;
+  videos_with_hashtags: number;
+} {
+  const db = getDb();
+  const clean = creator.toLowerCase().replace(/^@/, '').trim();
+  const row = db.prepare(`
+    SELECT 
+      COUNT(DISTINCT hashtag) as unique_tags,
+      COUNT(*) as total_usages,
+      COUNT(DISTINCT video_id) as tagged_videos
+    FROM video_hashtags
+    WHERE username = ?
+  `).get(clean) as any;
+
+  return {
+    total_unique_hashtags: Number(row?.unique_tags || 0),
+    total_hashtag_usages: Number(row?.total_usages || 0),
+    videos_with_hashtags: Number(row?.tagged_videos || 0),
+  };
+}
+
+/**
+ * Returns overview statistics of hashtags across the entire dataset.
+ */
+export function getDatasetHashtagOverview(): {
+  total_unique_hashtags: number;
+  total_hashtag_usages: number;
+  videos_with_hashtags: number;
+} {
+  const db = getDb();
+  const row = db.prepare(`
+    SELECT 
+      COUNT(DISTINCT hashtag) as unique_tags,
+      COUNT(*) as total_usages,
+      COUNT(DISTINCT video_id) as tagged_videos
+    FROM video_hashtags
+  `).get() as any;
+
+  return {
+    total_unique_hashtags: Number(row?.unique_tags || 0),
+    total_hashtag_usages: Number(row?.total_usages || 0),
+    videos_with_hashtags: Number(row?.tagged_videos || 0),
+  };
+}
+
+/**
+ * Returns count of unique hashtags in video_hashtags, optionally filtered by creator.
+ */
+export function countHashtags(creatorFilter?: string): number {
+  const db = getDb();
+  if (creatorFilter) {
+    const clean = creatorFilter.toLowerCase().replace(/^@/, '').trim();
+    const row = db.prepare('SELECT COUNT(DISTINCT hashtag) as cnt FROM video_hashtags WHERE username = ?').get(clean) as any;
+    return Number(row?.cnt || 0);
+  }
+  const row = db.prepare('SELECT COUNT(DISTINCT hashtag) as cnt FROM video_hashtags').get() as any;
+  return Number(row?.cnt || 0);
+}
+
+export interface VideoHashtagData {
+  video_id: string;
+  username?: string;
+  video_found: boolean;
+  has_hashtag_data: boolean;     // false if video not found or description is null/undefined
+  has_description: boolean;      // true if description is present and non-empty
+  description?: string | null;
+  hashtags: string[];            // list of hashtag strings (without '#')
+}
+
+/**
+ * Returns hashtags specifically belonging to a single video.
+ * Adheres strictly to the VIDEO scope (never falls back to creator or dataset).
+ */
+export function getVideoHashtags(videoId: string): VideoHashtagData {
+  const db = getDb();
+  const cleanId = videoId.trim();
+  const video = db.prepare(
+    "SELECT video_id, username, description, status FROM videos WHERE video_id = ?"
+  ).get(cleanId) as any;
+
+  if (!video) {
+    return {
+      video_id: cleanId,
+      video_found: false,
+      has_hashtag_data: false,
+      has_description: false,
+      hashtags: [],
+    };
+  }
+
+  // Check if description exists in database
+  const hasDesc = video.description !== null && video.description !== undefined;
+  if (!hasDesc) {
+    return {
+      video_id: video.video_id,
+      username: video.username,
+      video_found: true,
+      has_hashtag_data: false,
+      has_description: false,
+      hashtags: [],
+    };
+  }
+
+  // Query video_hashtags
+  const rows = db.prepare(
+    "SELECT hashtag, position FROM video_hashtags WHERE video_id = ? ORDER BY position ASC"
+  ).all(cleanId) as any[];
+
+  let tags: string[] = rows.map((r) => r.hashtag);
+  // If video_hashtags table does not have rows yet, fallback to parsing on-the-fly from description
+  if (tags.length === 0 && video.description) {
+    tags = parseHashtags(video.description);
+  }
+
+  const descTrimmed = typeof video.description === 'string' ? video.description.trim() : '';
+
+  return {
+    video_id: video.video_id,
+    username: video.username,
+    video_found: true,
+    has_hashtag_data: true,
+    has_description: descTrimmed.length > 0,
+    description: video.description,
+    hashtags: tags,
+  };
 }
 

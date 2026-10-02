@@ -114,6 +114,8 @@ export interface DiscoveredVideoReference {
   normalized?: NormalizedTikTokVideo;
 }
 
+export type OnVideoDiscoveredCallback = (video: DiscoveredVideoReference, currentCount: number) => void;
+
 export interface ProfileDiscoveryResult {
   profile_id: string;
   username: string;

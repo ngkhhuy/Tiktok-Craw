@@ -24,7 +24,8 @@ export type QueryIntent =
   | 'CORRELATION'
   | 'CREATOR_ANALYSIS'
   | 'HYBRID'
-  | 'DATASET_OVERVIEW';
+  | 'DATASET_OVERVIEW'
+  | 'HASHTAG_ANALYSIS';
 
 export interface ResolvedEntities {
   videoIds: string[];
@@ -39,6 +40,13 @@ export interface ResolvedEntities {
   order: 'DESC' | 'ASC';
   searchTerm?: string;
   percentileTarget?: number;
+  hashtag?: string;         // specific hashtag queried (e.g. "vietnam")
+  displayHashtag?: string;  // original display hashtag (e.g. "#AnDo")
+  hashtags?: string[];      // list of hashtags if multiple were queried
+  displayHashtags?: string[]; // list of original display hashtags
+  isHashtagQuery?: boolean; // true when query is primarily about hashtags
+  isHashtagIntersection?: boolean; // true when querying intersection of multiple tags
+  isHashtagComparison?: boolean;   // true when querying comparison between tags
 }
 
 export interface MetricAggregationPlan {

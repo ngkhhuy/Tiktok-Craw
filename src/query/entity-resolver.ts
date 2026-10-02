@@ -64,6 +64,14 @@ export class EntityResolver {
     const metricPlans = this.extractMetricPlans(text, resolvedMetrics, aggregation);
     const { isRanking, limit, order } = this.extractRankingParameters(text);
     const searchTerm = this.extractSearchTerm(text);
+    const hashtagData = this.extractHashtags(text);
+    const hashtag = hashtagData.hashtag;
+    const displayHashtag = hashtagData.displayHashtag;
+    const hashtags = hashtagData.hashtags.length > 0 ? hashtagData.hashtags : undefined;
+    const displayHashtags = hashtagData.displayHashtags.length > 0 ? hashtagData.displayHashtags : undefined;
+    const isHashtagIntersection = hashtagData.isIntersection;
+    const isHashtagComparison = hashtagData.isComparison;
+    const isHashtagQuery = this.detectHashtagQuery(text) || hashtagData.hashtags.length > 0;
 
     return {
       videoIds,
@@ -75,11 +83,19 @@ export class EntityResolver {
       filters: {
         creator,
         keyword: searchTerm,
+        hashtag,
       },
       isRanking,
       limit,
       order,
       searchTerm,
+      hashtag,
+      displayHashtag,
+      hashtags,
+      displayHashtags,
+      isHashtagQuery,
+      isHashtagIntersection,
+      isHashtagComparison,
     };
   }
 
@@ -394,6 +410,67 @@ export class EntityResolver {
     }
 
     return undefined;
+  }
+
+  /**
+   * Extracts one or more hashtags referenced in the query, detecting intersection and comparison intents.
+   */
+  private extractHashtags(text: string): {
+    hashtag?: string;
+    displayHashtag?: string;
+    hashtags: string[];
+    displayHashtags: string[];
+    isIntersection: boolean;
+    isComparison: boolean;
+  } {
+    const list: Array<{ normalized: string; display: string }> = [];
+    const seen = new Set<string>();
+
+    // 1. Explicit #tag references (e.g. #AnDo, #dulich, #travel)
+    const hashMatches = text.matchAll(/#([^\s#\u200b.,!?;:)([\]{}'"\u0300-\u036f]{2,})/gu);
+    for (const m of hashMatches) {
+      const raw = m[1].trim();
+      const norm = raw.toLowerCase();
+      if (norm.length >= 2 && !seen.has(norm)) {
+        seen.add(norm);
+        list.push({ normalized: norm, display: `#${raw}` });
+      }
+    }
+
+    // 2. "hashtag <tag>" patterns if not already matched
+    const keywordMatches = text.matchAll(/\bhashtag\s+[:=]?\s*#?([a-zA-Z0-9_\p{L}]{2,})\b/gu);
+    const questionWords = new Set([
+      'nào', 'nao', 'phổ', 'pho', 'biến', 'bien', 'nhiều', 'nhieu', 'nhất', 'nhat',
+      'dùng', 'dung', 'nổi', 'noi', 'gì', 'gi', 'popular', 'top', 'trend', 'trending',
+      'bao', 'nhiêu', 'trong', 'toàn', 'toan', 'bộ', 'bo', 'của', 'cua'
+    ]);
+    for (const m of keywordMatches) {
+      const raw = m[1].trim();
+      const candidate = raw.toLowerCase();
+      if (!questionWords.has(candidate) && candidate.length >= 2 && !seen.has(candidate)) {
+        seen.add(candidate);
+        list.push({ normalized: candidate, display: `#${raw}` });
+      }
+    }
+
+    const isComparison = list.length >= 2 && /\b(so sánh|so voi|so với|hơn|kém|khác nhau|đối đầu|vs)\b/i.test(text);
+    const isIntersection = list.length >= 2 && /\b(vừa.*vừa|cả.*và|đồng thời|giao nhau|cùng lúc|cả hai|cả 2)\b/i.test(text);
+
+    return {
+      hashtag: list[0]?.normalized,
+      displayHashtag: list[0]?.display,
+      hashtags: list.map((item) => item.normalized),
+      displayHashtags: list.map((item) => item.display),
+      isIntersection,
+      isComparison,
+    };
+  }
+
+  /**
+   * Returns true if the query is primarily about hashtag analysis.
+   */
+  private detectHashtagQuery(text: string): boolean {
+    return /\b(hashtag|#[a-zA-Z\p{L}]|tag phổ biến|tag nào|dùng hashtag|hashtag nào|top hashtag|trending tag|xu hướng hashtag)\b/iu.test(text);
   }
 }
 

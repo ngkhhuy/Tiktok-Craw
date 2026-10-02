@@ -136,6 +136,22 @@
               <option value="32">32 luồng</option>
             </select>
           </div>
+          <div class="concurrency-picker" title="Số lượng video muốn trích xuất từ kênh">
+            <label for="limitSelect" class="concurrency-lbl">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="2" y="2" width="20" height="20" rx="3" ry="3"></rect>
+                <line x1="8" y1="2" x2="8" y2="22"></line>
+                <line x1="16" y1="2" x2="16" y2="22"></line>
+              </svg>
+              <span>Số video:</span>
+            </label>
+            <select id="limitSelect" class="concurrency-select">
+              <option value="20" selected>20 video mới nhất (Cực nhanh ~3s)</option>
+              <option value="50">50 video mới nhất (~5s)</option>
+              <option value="100">100 video (~10s)</option>
+              <option value="0">Toàn bộ kênh (Tải song song)</option>
+            </select>
+          </div>
           <button id="btnStartIngest" class="btn btn-primary btn-glow">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>

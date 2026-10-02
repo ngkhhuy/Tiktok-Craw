@@ -11,7 +11,7 @@ import { analyticsEngine, VideoAnalyticsDetails, VideoComparisonResult } from '.
 import { getPopulationBaseline } from '../analytics/baseline.js';
 import { isDerivedRateMetric, getRateMetricFormula } from '../analytics/metric-definitions.js';
 import { normalizeCreatorHandle } from '../query/entity-resolver.js';
-import { getVideoStats } from '../storage/database.js';
+import { getVideoStats, getTopHashtags, getVideosByHashtag, getCreatorHashtags, countHashtags, syncAllHashtags, getVideoHashtags, getCreatorHashtagOverview, getDatasetHashtagOverview } from '../storage/database.js';
 import { QueryPlan } from '../query/intents.js';
 import { RetrievedChunk, semanticRetriever } from '../retrieval/semantic-retriever.js';
 import { SWAYSEEK_SYSTEM_PROMPT } from '../rag/prompts.js';
@@ -165,6 +165,7 @@ export class ContextBuilder {
 
       case 'RANKING': {
         const targetMetric = plan.entities.metrics[0] || 'views';
+        const limit = plan.entities.limit || 5;
         const isExplicitVideo = /\b(video|clip|bài đăng)\b/i.test(question);
         const isChannel =
           !isExplicitVideo &&
@@ -255,6 +256,247 @@ export class ContextBuilder {
         const chunks = await semanticRetriever.retrieve(question, { limit: plan.entities.limit || 6 });
         evidence.retrieved_chunks = chunks;
         evidence.data_provenance.source_tables.push('comments');
+        break;
+      }
+
+      case 'HASHTAG_ANALYSIS': {
+        const hashtagCount = countHashtags();
+        if (hashtagCount === 0) {
+          syncAllHashtags();
+        }
+
+        const requestedVideoId = plan.entities.videoIds && plan.entities.videoIds.length > 0
+          ? plan.entities.videoIds[0]
+          : undefined;
+        const creatorFilter = plan.entities.creator
+          ? normalizeCreatorHandle(plan.entities.creator)
+          : undefined;
+        const hashLimit = plan.entities.limit || 10;
+        const hashMetric = plan.entities.metrics[0] === 'likes' ? 'likes'
+          : plan.entities.metrics[0] === 'shares' ? 'shares'
+          : 'views';
+
+        // ─── SCOPE LEVEL 1: VIDEO SCOPE GUARD (Strict isolation) ───
+        if (requestedVideoId) {
+          const videoData = getVideoHashtags(requestedVideoId);
+
+          // Evidence Validation: assert evidence.video_id == requested_video_id
+          if (!videoData || videoData.video_id !== requestedVideoId) {
+            evidence.metrics.hashtag = {
+              scope: 'VIDEO',
+              video_id: requestedVideoId,
+              status: 'REJECT_EVIDENCE',
+              message: `REJECT_EVIDENCE: Hashtag evidence mismatch for video ${requestedVideoId}`,
+            };
+          } else if (!videoData.video_found) {
+            evidence.metrics.hashtag = {
+              scope: 'VIDEO',
+              video_id: requestedVideoId,
+              status: 'VIDEO_NOT_FOUND',
+              video_found: false,
+              has_hashtag_data: false,
+              message: `Video ${requestedVideoId} không tồn tại trong tập dữ liệu completed.`,
+            };
+          } else if (!videoData.has_hashtag_data) {
+            // Video exists, but description / hashtag data is absent
+            evidence.metrics.hashtag = {
+              scope: 'VIDEO',
+              video_id: requestedVideoId,
+              username: videoData.username,
+              status: 'NO_VIDEO_LEVEL_DATA',
+              video_found: true,
+              has_hashtag_data: false,
+              message: `Không có đủ dữ liệu hashtag cho video ${requestedVideoId} để trả lời câu hỏi này.`,
+            };
+          } else if (videoData.hashtags.length === 0) {
+            // Video has description, but contains 0 hashtags (factual absence)
+            evidence.metrics.hashtag = {
+              scope: 'VIDEO',
+              video_id: requestedVideoId,
+              username: videoData.username,
+              status: 'NO_HASHTAGS_IN_VIDEO',
+              video_found: true,
+              has_hashtag_data: true,
+              hashtags: [],
+              message: `Video ${requestedVideoId} có dữ liệu mô tả nhưng không sử dụng hashtag nào.`,
+            };
+          } else {
+            // Video has valid hashtags
+            evidence.metrics.hashtag = {
+              scope: 'VIDEO',
+              video_id: requestedVideoId,
+              username: videoData.username,
+              status: 'SUCCESS',
+              video_found: true,
+              has_hashtag_data: true,
+              total_hashtags: videoData.hashtags.length,
+              hashtags: videoData.hashtags.map((tag, idx) => ({
+                hashtag: `#${tag}`,
+                position: idx + 1,
+              })),
+            };
+          }
+
+          // Strict Evidence Isolation: never attach external retrieved chunks from other videos or global rankings
+          if (evidence.retrieved_chunks && evidence.retrieved_chunks.length > 0) {
+            evidence.retrieved_chunks = evidence.retrieved_chunks.filter(
+              (c) => c.entity_id === requestedVideoId || c.metadata?.video_id === requestedVideoId
+            );
+          }
+
+          evidence.data_provenance.source_tables.push('video_hashtags', 'videos');
+          break;
+        }
+
+        // ─── SCOPE LEVEL 2a: HASHTAG COMPARISON ───
+        if (plan.entities.isHashtagComparison && plan.entities.hashtags && plan.entities.hashtags.length >= 2) {
+          const tag1 = plan.entities.hashtags[0];
+          const tag2 = plan.entities.hashtags[1];
+          const targetMetric = plan.entities.metrics[0] || 'views';
+          const comp = analyticsEngine.compareHashtags(tag1, tag2, targetMetric, { creator: creatorFilter });
+
+          evidence.metrics.hashtag = {
+            scope: creatorFilter ? 'CREATOR' : 'DATASET',
+            type: 'COMPARISON',
+            comparison: comp,
+            display_tag: `${comp.tag1.population.filters.display_tag} vs ${comp.tag2.population.filters.display_tag}`,
+            source: 'sqlite',
+          };
+          evidence.data_provenance.source_tables.push('video_hashtags', 'videos');
+          break;
+        }
+
+        // ─── SCOPE LEVEL 2b: HASHTAG INTERSECTION ───
+        if (plan.entities.isHashtagIntersection && plan.entities.hashtags && plan.entities.hashtags.length >= 2) {
+          const targetMetric = plan.entities.metrics[0] || 'views';
+          const targetOp = plan.metrics?.[0]?.aggregation || plan.entities.aggregation || 'COUNT';
+          const stats = analyticsEngine.getHashtagIntersection(
+            plan.entities.hashtags,
+            targetOp,
+            targetMetric,
+            { creator: creatorFilter }
+          );
+
+          evidence.metrics.hashtag = {
+            scope: creatorFilter ? 'CREATOR' : 'SPECIFIC_HASHTAG',
+            type: 'INTERSECTION',
+            creator: creatorFilter ? `@${creatorFilter}` : undefined,
+            queried_tag: stats.population.filters.display_tag,
+            display_tag: stats.population.filters.display_tag,
+            normalized_tag: stats.population.filters.normalized_tag,
+            operation: targetOp,
+            metric: targetMetric,
+            population: stats.population,
+            aggregation: stats.aggregation,
+            video_count: stats.population.count,
+            total_views: stats.aggregation.sum,
+            avg_views: stats.aggregation.avg,
+            min_views: stats.aggregation.min,
+            max_views: stats.aggregation.max,
+            videos: stats.sample_videos,
+            entity_ids: stats.entity_ids,
+            source: 'sqlite',
+          };
+
+          if (creatorFilter && evidence.retrieved_chunks && evidence.retrieved_chunks.length > 0) {
+            evidence.retrieved_chunks = evidence.retrieved_chunks.filter(
+              (c) => c.metadata?.username?.toLowerCase() === creatorFilter.toLowerCase()
+            );
+          }
+
+          evidence.data_provenance.source_tables.push('video_hashtags', 'videos');
+          break;
+        }
+
+        // ─── SCOPE LEVEL 2c: SPECIFIC HASHTAG LOOKUP & POPULATION AGGREGATION ───
+        // (Must precede general creator hashtags when a specific hashtag is queried)
+        if (plan.entities.hashtag) {
+          const rawTag = plan.entities.displayHashtag || plan.entities.hashtag;
+          const displayTag = rawTag.startsWith('#') ? rawTag : `#${rawTag}`;
+          const normalizedTag = plan.entities.hashtag.toLowerCase().replace(/^#/, '').trim();
+
+          const targetMetric = plan.entities.metrics[0] || 'views';
+          const targetOp = plan.metrics?.[0]?.aggregation || plan.entities.aggregation || 'SUM';
+
+          const stats = analyticsEngine.getHashtagAnalytics(
+            normalizedTag,
+            targetOp,
+            targetMetric,
+            { creator: creatorFilter }
+          );
+
+          evidence.metrics.hashtag = {
+            scope: creatorFilter ? 'CREATOR' : 'SPECIFIC_HASHTAG',
+            creator: creatorFilter ? `@${creatorFilter}` : undefined,
+            queried_tag: displayTag,
+            display_tag: displayTag,
+            normalized_tag: normalizedTag,
+            operation: targetOp,
+            metric: targetMetric,
+            population: stats.population,
+            aggregation: stats.aggregation,
+            video_count: stats.population.count,
+            total_views: stats.aggregation.sum,
+            avg_views: stats.aggregation.avg,
+            min_views: stats.aggregation.min,
+            max_views: stats.aggregation.max,
+            videos: stats.sample_videos,
+            entity_ids: stats.entity_ids,
+            source: 'sqlite',
+          };
+
+          if (creatorFilter && evidence.retrieved_chunks && evidence.retrieved_chunks.length > 0) {
+            evidence.retrieved_chunks = evidence.retrieved_chunks.filter(
+              (c) => c.metadata?.username?.toLowerCase() === creatorFilter.toLowerCase()
+            );
+          }
+
+          evidence.data_provenance.source_tables.push('video_hashtags', 'videos');
+          break;
+        }
+
+        // ─── SCOPE LEVEL 3: CREATOR SCOPE GUARD (General creator hashtags, e.g. "top hashtag của @khoailangthang", "có bao nhiêu hashtag?") ───
+        if (creatorFilter) {
+          const overview = getCreatorHashtagOverview(creatorFilter);
+          const topHashtags = getCreatorHashtags(creatorFilter, hashLimit);
+          const isCount = plan.entities.aggregation === 'COUNT' || /(bao nhiêu|tổng số|so luong|số lượng|count)/i.test(plan.explanation || '') || /(bao nhiêu|tổng số|so luong|số lượng|count)/i.test(plan.entities.searchTerm || '');
+
+          evidence.metrics.hashtag = {
+            scope: 'CREATOR',
+            creator: `@${creatorFilter}`,
+            status: overview.total_unique_hashtags > 0 ? 'SUCCESS' : 'NO_CREATOR_HASHTAGS',
+            is_count_query: isCount,
+            total_unique_hashtags: overview.total_unique_hashtags,
+            total_hashtag_usages: overview.total_hashtag_usages,
+            videos_with_hashtags: overview.videos_with_hashtags,
+            top_hashtags: topHashtags,
+          };
+
+          if (evidence.retrieved_chunks && evidence.retrieved_chunks.length > 0) {
+            evidence.retrieved_chunks = evidence.retrieved_chunks.filter(
+              (c) => c.metadata?.username?.toLowerCase() === creatorFilter.toLowerCase()
+            );
+          }
+
+          evidence.data_provenance.source_tables.push('video_hashtags');
+          break;
+        }
+
+        // ─── SCOPE LEVEL 4: GLOBAL DATASET SCOPE ───
+        const datasetOverview = getDatasetHashtagOverview();
+        const topHashtags = getTopHashtags(hashMetric as any, hashLimit);
+        const isDatasetCount = plan.entities.aggregation === 'COUNT' || /(bao nhiêu|tổng số|so luong|số lượng|count)/i.test(plan.explanation || '') || /(bao nhiêu|tổng số|so luong|số lượng|count)/i.test(plan.entities.searchTerm || '');
+
+        evidence.metrics.hashtag = {
+          scope: 'DATASET',
+          metric: hashMetric,
+          is_count_query: isDatasetCount,
+          total_unique_hashtags: datasetOverview.total_unique_hashtags,
+          total_hashtag_usages: datasetOverview.total_hashtag_usages,
+          videos_with_hashtags: datasetOverview.videos_with_hashtags,
+          top_hashtags: topHashtags,
+        };
+        evidence.data_provenance.source_tables.push('video_hashtags');
         break;
       }
 

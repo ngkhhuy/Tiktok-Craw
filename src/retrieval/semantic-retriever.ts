@@ -13,7 +13,7 @@ import { SQLiteVectorStore, vectorStore, VectorRecord } from '../vector/vector-s
 
 export interface RetrievedChunk {
   id: string;
-  entity_type: 'comment' | 'caption' | 'video_summary';
+  entity_type: 'comment' | 'caption' | 'video_summary' | 'hashtag';
   entity_id: string;
   text: string;
   score: number;
@@ -27,7 +27,7 @@ export interface RetrievedChunk {
 }
 
 export interface RetrievalOptions {
-  entityType?: 'comment' | 'caption' | 'video_summary';
+  entityType?: 'comment' | 'caption' | 'video_summary' | 'hashtag';
   limit?: number;
   minSimilarity?: number;
   videoId?: string;
@@ -130,11 +130,60 @@ export class SemanticRetriever {
   }
 
   /**
+   * Indexes top hashtags into vector store for semantic hashtag discovery.
+   * Each record = "hashtag #X used in N videos by @creator1, @creator2..."
+   */
+  async indexHashtags(limit: number = 200): Promise<number> {
+    // Import lazily to avoid circular deps
+    const { getTopHashtags } = await import('../storage/database.js');
+    const topTags = getTopHashtags('views', limit);
+    if (topTags.length === 0) return 0;
+
+    const dims = embeddingService.getDimensions();
+    const model = embeddingService.getModelName();
+
+    const texts = topTags.map((t) =>
+      `Hashtag #${t.hashtag}: used in ${t.video_count} videos, total ${t.total_views.toLocaleString()} views, avg ${Math.round(t.avg_views).toLocaleString()} views/video. Top creators: ${t.top_creators.map((c) => `@${c}`).join(', ') || 'N/A'}`
+    );
+    const embeddings = await embeddingService.embedBatch(texts);
+
+    const records: VectorRecord[] = topTags.map((t, i) => ({
+      id: `hashtag_${t.hashtag}`,
+      entityType: 'hashtag',
+      entityId: t.hashtag,
+      chunkText: texts[i],
+      embedding: embeddings[i],
+      dimensions: dims,
+      model,
+      metadata: {
+        hashtag: t.hashtag,
+        video_count: t.video_count,
+        total_views: t.total_views,
+        avg_views: t.avg_views,
+        top_creators: t.top_creators,
+      },
+    }));
+
+    return vectorStore.upsertBatch(records);
+  }
+
+  /**
    * Auto-indexes dataset if vector store is empty.
    */
-  /**
-   * Indexes comments for a specific video on-demand into the vector store.
-   */
+  async ensureIndexed(): Promise<void> {
+    const count = vectorStore.count();
+    if (count === 0) {
+      console.log('[RETRIEVER] Vector store is empty. Auto-indexing video captions, top comments, and hashtags...');
+      const caps = await this.indexVideoCaptions();
+      const comms = await this.indexComments(15, 1000);
+      // Sync hashtag table first, then index
+      const { syncAllHashtags } = await import('../storage/database.js');
+      syncAllHashtags();
+      const tags = await this.indexHashtags(200);
+      console.log(`[RETRIEVER] Indexed ${caps} captions, ${comms} comments, ${tags} hashtags.`);
+    }
+  }
+
   async indexVideoComments(videoId: string, maxComments: number = 30): Promise<number> {
     const comments = this.db
       .prepare(`
@@ -170,19 +219,6 @@ export class SemanticRetriever {
     }));
 
     return vectorStore.upsertBatch(records);
-  }
-
-  /**
-   * Auto-indexes dataset if vector store is empty.
-   */
-  async ensureIndexed(): Promise<void> {
-    const count = vectorStore.count();
-    if (count === 0) {
-      console.log('[RETRIEVER] Vector store is empty. Auto-indexing video captions and top comments...');
-      const caps = await this.indexVideoCaptions();
-      const comms = await this.indexComments(15, 1000);
-      console.log(`[RETRIEVER] Indexed ${caps} captions and ${comms} comments.`);
-    }
   }
 
   /**

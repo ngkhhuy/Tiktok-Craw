@@ -8,11 +8,23 @@ import {
   NormalizedTikTokVideo,
   ProfileDiscoveryResult,
   DiscoveredVideoReference,
+  OnVideoDiscoveredCallback,
 } from '../types.js';
 import { extractRehydrationData, normalizeVideoMetadata } from '../http/video.js';
 
 export class BrowserFallbackService {
   private context: BrowserContext | null = null;
+
+  async prewarm(): Promise<void> {
+    try {
+      if (!this.context) {
+        await this.getContext();
+        logger.stage('browser', 'Browser persistent context pre-warmed successfully');
+      }
+    } catch (err: any) {
+      logger.debug(`Browser prewarm ignored: ${err.message}`);
+    }
+  }
 
   private async getContext(): Promise<BrowserContext> {
     if (this.context) return this.context;
@@ -71,7 +83,8 @@ export class BrowserFallbackService {
   async discoverVideos(
     profile: NormalizedTikTokProfile,
     limit: number = 20,
-    existingVideos: DiscoveredVideoReference[] = []
+    existingVideos: DiscoveredVideoReference[] = [],
+    onVideoDiscovered?: OnVideoDiscoveredCallback
   ): Promise<ProfileDiscoveryResult> {
     logger.stage('browser', `Executing browser fallback for @${profile.username} (target limit: ${limit})`);
 
@@ -83,6 +96,10 @@ export class BrowserFallbackService {
     const page = await context.newPage();
 
     try {
+      const targetCount = (limit && limit > 0)
+        ? Math.min(limit, profile.stats.videos > 0 ? profile.stats.videos : limit)
+        : (profile.stats.videos || 20);
+
       // 1. Intercept network responses for the user's post list ONLY
       page.on('response', async (res) => {
         const url = res.url();
@@ -94,7 +111,7 @@ export class BrowserFallbackService {
               const items = data.itemList || data.aweme_list || [];
               if (Array.isArray(items)) {
                 for (const item of items) {
-                  if (videos.length >= limit) break;
+                  if (videos.length >= targetCount) break;
                   // STRICT AUTHOR VALIDATION: Must belong to target profile (by author id or uniqueId)
                   const author = (item.author?.uniqueId || item.author?.unique_id || '').toLowerCase();
                   const authorId = String(item.author?.id || item.author?.uid || '');
@@ -107,13 +124,15 @@ export class BrowserFallbackService {
                     seenVideoIds.add(vId);
                     const itemUrl = `https://www.tiktok.com/@${item.author?.uniqueId || profile.username}/video/${vId}`;
                     const normalized = normalizeVideoMetadata(item, itemUrl);
-                    videos.push({
+                    const videoRef: DiscoveredVideoReference = {
                       video_id: vId,
                       url: itemUrl,
                       published_at: normalized.published_at,
                       description: normalized.content.description,
                       normalized,
-                    });
+                    };
+                    videos.push(videoRef);
+                    onVideoDiscovered?.(videoRef, videos.length);
                   }
                 }
               }
@@ -124,64 +143,78 @@ export class BrowserFallbackService {
 
       const profileUrl = `https://www.tiktok.com/@${profile.username}`;
       await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await page.waitForTimeout(3000);
+      // Brief wait for initial TikTok client-side SSR hydration
+      await page.waitForTimeout(1500);
 
       // Attempt to dismiss modal / captcha if present
       try {
         const closeBtn = await page.$('[data-e2e="modal-close-inner-button"], button[aria-label="Close"], [class*="close"]');
         if (closeBtn && await closeBtn.isVisible()) {
           await closeBtn.click();
-          await page.waitForTimeout(500);
+          await page.waitForTimeout(300);
         } else {
           await page.keyboard.press('Escape');
         }
       } catch {}
 
-      // Scroll to trigger video loads
-      let scrolls = 0;
-      let consecutiveNoNewVideos = 0;
-      let prevCount = videos.length;
-      const targetCount = Math.max(limit, profile.stats.videos || 0);
-      const maxScrolls = Math.max(60, Math.ceil(targetCount / 3) + 20);
+      // Fast check: If initial page load already satisfied targetCount, finish immediately!
+      if (videos.length >= targetCount) {
+        logger.stage('browser', `Initial load satisfied target limit (${videos.length}/${targetCount} videos). Finished.`);
+        await page.close();
+      } else {
+        // Scroll to trigger remaining video loads with fast 600ms polling
+        let scrolls = 0;
+        let consecutiveNoNewVideos = 0;
+        let prevCount = videos.length;
+        const needed = Math.max(0, targetCount - videos.length);
+        const maxScrolls = Math.max(8, Math.ceil(needed / 10) + 4);
 
-      while (videos.length < targetCount && scrolls < maxScrolls) {
-        scrolls++;
-        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-        await page.waitForTimeout(2000);
+        while (videos.length < targetCount && scrolls < maxScrolls) {
+          scrolls++;
+          await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+          await page.waitForTimeout(600);
 
-        // Inspect DOM links strictly under this profile's username
-        const domLinks = await page.$$eval('[data-e2e="user-post-item"] a, a[href*="/video/"]', els =>
-          els.map(a => (a as HTMLAnchorElement).href || '')
-        );
+          // Inspect DOM links strictly under this profile's username
+          const domLinks = await page.$$eval('[data-e2e="user-post-item"] a, a[href*="/video/"]', els =>
+            els.map(a => (a as HTMLAnchorElement).href || '')
+          );
 
-        for (const href of domLinks) {
-          if (videos.length >= targetCount) break;
-          // STRICT URL MATCHING: Must belong to target user
-          const match = href.match(new RegExp(`/@${profile.username}/video/(\\d+)`, 'i'));
-          if (match) {
-            const vId = match[1];
-            if (!seenVideoIds.has(vId)) {
-              seenVideoIds.add(vId);
-              videos.push({
-                video_id: vId,
-                url: href,
-              });
+          for (const href of domLinks) {
+            if (videos.length >= targetCount) break;
+            // STRICT URL MATCHING: Must belong to target user
+            const match = href.match(new RegExp(`/@${profile.username}/video/(\\d+)`, 'i'));
+            if (match) {
+              const vId = match[1];
+              if (!seenVideoIds.has(vId)) {
+                seenVideoIds.add(vId);
+                const videoRef: DiscoveredVideoReference = {
+                  video_id: vId,
+                  url: href,
+                };
+                videos.push(videoRef);
+                onVideoDiscovered?.(videoRef, videos.length);
+              }
             }
           }
+
+          if (videos.length >= targetCount) {
+            break;
+          }
+
+          if (videos.length === prevCount) {
+            consecutiveNoNewVideos++;
+            if (consecutiveNoNewVideos >= 2) {
+              break; // Reached bottom of profile feed
+            }
+          } else {
+            consecutiveNoNewVideos = 0;
+            prevCount = videos.length;
+          }
         }
 
-        if (videos.length === prevCount) {
-          consecutiveNoNewVideos++;
-          if (consecutiveNoNewVideos >= 4) {
-            break; // Reached bottom of profile feed
-          }
-        } else {
-          consecutiveNoNewVideos = 0;
-          prevCount = videos.length;
-        }
+        await page.close();
       }
 
-      await page.close();
     } catch (err: any) {
       logger.warn(`Browser fallback encountered error: ${err.message}`);
       await page.close().catch(() => {});

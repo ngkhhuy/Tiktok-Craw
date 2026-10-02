@@ -267,12 +267,28 @@ export class VideoCrawler {
             logger.videoProgress(videoId, 'sha256', 'success', sha256Val.slice(0, 12) + '...');
           } else {
             // Regular MP4 Video Download
-            const downloadRes = await mediaLimiter.run(() =>
-              mediaDownloader.downloadVideo(mediaUrl!, videoFile, {
-                cookies: metadata?.cookies,
-                referer: targetUrl,
-              })
-            );
+            let downloadRes;
+            try {
+              downloadRes = await mediaLimiter.run(() =>
+                mediaDownloader.downloadVideo(mediaUrl!, videoFile, {
+                  cookies: metadata?.cookies,
+                  referer: targetUrl,
+                })
+              );
+            } catch (dlErr: any) {
+              logger.warn(`Direct media download failed for ${videoId} (${dlErr.message}). Falling back to media resolver...`);
+              const resolved = await mediaResolver.resolveMedia(targetUrl, videoId);
+              if (resolved?.video_url) {
+                mediaUrl = resolved.video_url;
+                downloadRes = await mediaLimiter.run(() =>
+                  mediaDownloader.downloadVideo(mediaUrl!, videoFile, {
+                    referer: targetUrl,
+                  })
+                );
+              } else {
+                throw dlErr;
+              }
+            }
 
             sha256Val = downloadRes.sha256;
             manifest.stages.video.status = 'completed';

@@ -66,6 +66,7 @@ const elements = {
   ingest: {
     input: document.getElementById('ingestInput'),
     concurrencySelect: document.getElementById('concurrencySelect'),
+    limitSelect: document.getElementById('limitSelect'),
     btnClear: document.getElementById('btnClearIngest'),
     btnStart: document.getElementById('btnStartIngest'),
     quickChips: document.querySelectorAll('.chip-item'),
@@ -1102,7 +1103,20 @@ function initEvents() {
   // 10. Ingest & Crawl Controls
   if (elements.ingest.input) {
     setupMentionForInput(elements.ingest.input, 'below');
+
+    let hasPrewarmed = false;
+    const triggerPrewarm = () => {
+      if (!hasPrewarmed) {
+        hasPrewarmed = true;
+        fetch('/api/prewarm', { method: 'POST' }).catch(() => {});
+      }
+    };
+
+    elements.ingest.input.addEventListener('focus', triggerPrewarm);
+    elements.ingest.input.addEventListener('mouseenter', triggerPrewarm);
+
     elements.ingest.input.addEventListener('input', (e) => {
+      triggerPrewarm();
       if (e.target.value.trim().length > 0) {
         elements.ingest.btnClear.classList.remove('hidden');
       } else {
@@ -1244,10 +1258,12 @@ async function startCrawlJob(input, type) {
 
   try {
     const concurrency = parseInt(elements.ingest.concurrencySelect?.value || '16', 10);
+    const limitVal = parseInt(elements.ingest.limitSelect?.value || '0', 10);
+    const limit = limitVal > 0 ? limitVal : 1000;
     const res = await fetch('/api/crawl', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ input, limit: 1000, concurrency }),
+      body: JSON.stringify({ input, limit, concurrency }),
     });
 
     const data = await res.json();
@@ -2424,4 +2440,6 @@ document.addEventListener('DOMContentLoaded', () => {
   fetchVideos();
   fetchProfiles();
   fetchSystemInfo();
+  // Warm up browser in background so initial crawl starts instantly
+  fetch('/api/prewarm', { method: 'POST' }).catch(() => {});
 });
